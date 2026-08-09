@@ -15,7 +15,7 @@ class PatchSolver:
 
     def solve(self, context: SolverContext) -> SolverOutcome:
         destination = "/tmp/taskbundle-input.patch"
-        context.docker.copy_file(
+        context.docker.stream_file(
             source=self.patch_path,
             container_id=context.container_id,
             destination=destination,

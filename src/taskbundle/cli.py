@@ -15,10 +15,12 @@ from rich.console import Console
 from rich.table import Table
 
 from taskbundle import __version__
+from taskbundle.artifacts import verify_artifact_records
 from taskbundle.config import Bundle, load_bundle
 from taskbundle.errors import (
     ErrorKind,
     ExitCode,
+    InvalidTaskError,
     TaskBundleError,
 )
 from taskbundle.lifecycle.initialize import initialize_task
@@ -95,6 +97,7 @@ def _render_success(report: CommandReport) -> None:
             f"Solver: [bold]{solver['adapter']}[/bold]; "
             f"captured {solver['patch_bytes']} patch bytes"
         )
+        console.print(f"Resolved: [bold]{'yes' if data['resolved'] else 'no'}[/bold]")
         table = Table("Suite", "Test", "Expected", "Observed", "Stable")
         for suite, tests in data["post_solver"]["phases"]["post_solver"].items():
             for test in tests:
@@ -126,6 +129,52 @@ def _render_success(report: CommandReport) -> None:
             console.print(
                 f"{event['occurred_at']} [{event['level']}] {event['phase']}: {event['message']}"
             )
+        if data["test_results"]:
+            console.print("[bold]Test results[/bold]")
+            table = Table("Phase", "Suite", "Test", "Attempt", "Expected", "Observed", "Exit")
+            for result in data["test_results"]:
+                table.add_row(
+                    result["phase"],
+                    result["suite"],
+                    result["test_id"],
+                    str(result["attempt"]),
+                    result["expected"],
+                    result["observed"],
+                    "" if result["exit_code"] is None else str(result["exit_code"]),
+                )
+            console.print(table)
+        if data["artifacts"]:
+            console.print("[bold]Artifacts[/bold]")
+            table = Table()
+            table.add_column("Kind")
+            table.add_column("Artifact", overflow="fold")
+            table.add_column("Bytes", justify="right")
+            for artifact in data["artifacts"]:
+                display_path = artifact["relative_path"].removeprefix(f"commands/{target['id']}/")
+                table.add_row(
+                    artifact["kind"],
+                    display_path,
+                    str(artifact["size_bytes"]),
+                )
+            console.print(table)
+    elif report.command == "artifacts":
+        table = Table()
+        table.add_column("Kind")
+        table.add_column("Artifact", overflow="fold")
+        table.add_column("Status")
+        table.add_column("Bytes", justify="right")
+        for artifact in data["artifacts"]:
+            display_path = artifact["relative_path"].removeprefix(
+                f"commands/{data['command']['id']}/"
+            )
+            table.add_row(
+                artifact["kind"],
+                display_path,
+                artifact["status"],
+                str(artifact["actual_size_bytes"]),
+            )
+        console.print(table)
+        console.print(f"Verified {data['count']} artifacts for {data['command']['id']}")
     elif report.command == "doctor":
         table = Table("Check", "Status", "Detail")
         for check in data["checks"]:
@@ -385,6 +434,53 @@ def logs_command(
         return data
 
     _execute(command_name="logs", bundle_path=bundle, json_output=json_output, operation=operation)
+
+
+@app.command("artifacts")
+def artifacts_command(
+    command_id: str = typer.Argument(..., help="Command ID whose artifacts should be verified."),
+    bundle: Path = typer.Option(Path("."), "--bundle", help="Task bundle directory."),
+    json_output: bool = typer.Option(False, "--json", help="Emit structured JSON."),
+) -> None:
+    """List and verify a command's artifact hashes and sizes."""
+
+    def operation(session: CommandSession) -> dict[str, Any]:
+        loaded = load_bundle(bundle, require_files=False)
+        session.attach_bundle(loaded.manifest.id)
+        target = session.database.get_command(command_id)
+        if target is None:
+            raise TaskBundleError(
+                f"Command ID was not found: {command_id}",
+                kind=ErrorKind.NOT_FOUND,
+                exit_code=ExitCode.CONFIGURATION,
+                hint="Run `task history` to list available command IDs.",
+            )
+        verification = verify_artifact_records(
+            state_dir=session.state_dir,
+            records=session.database.get_artifacts(command_id),
+        )
+        data = {"command": target, **verification}
+        session.event(
+            "info",
+            "query",
+            "Command artifacts verified.",
+            {
+                "target_command_id": command_id,
+                "count": verification["count"],
+                "valid": verification["valid"],
+            },
+        )
+        if not verification["valid"]:
+            raise InvalidTaskError(
+                f"One or more artifacts failed integrity verification for {command_id}.",
+                hint="Inspect missing, unsafe_path, or mismatch entries before trusting the run.",
+                details=data,
+            )
+        return data
+
+    _execute(
+        command_name="artifacts", bundle_path=bundle, json_output=json_output, operation=operation
+    )
 
 
 @app.command("doctor")

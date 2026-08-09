@@ -108,6 +108,7 @@ class RuntimeSpec(StrictModel):
     cpus: float = Field(default=2.0, gt=0, le=64)
     memory: str = Field(default="4g", pattern=r"^[1-9][0-9]*(?:[bkmgBKMG])$")
     pids: int = Field(default=256, ge=16, le=65_536)
+    tmpfs_size: str = Field(default="512m", pattern=r"^[1-9][0-9]*(?:[bkmgBKMG])$")
     solver_timeout_seconds: int = Field(default=1800, ge=1, le=86_400)
     max_patch_bytes: int = Field(default=10_000_000, ge=1, le=100_000_000)
     solver_network: bool = False

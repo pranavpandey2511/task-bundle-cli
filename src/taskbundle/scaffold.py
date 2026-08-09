@@ -62,6 +62,7 @@ def scaffold_bundle(*, root: Path, repo: str, commit: str, bundle_id: str) -> di
                     "cpus": 2,
                     "memory": "4g",
                     "pids": 256,
+                    "tmpfs_size": "512m",
                     "solver_timeout_seconds": 1800,
                     "solver_network": False,
                 },

@@ -236,11 +236,16 @@ def initialize_task(
             )
 
     smoke_name = container_name(bundle.manifest.id, session.command_id)
+    isolation = docker.isolation_profile(
+        runtime=bundle.manifest.runtime,
+        workdir=bundle.manifest.environment.workdir,
+        network="none",
+    )
     session.event(
         "info",
         "smoke",
         "Running isolated environment smoke command.",
-        {"container_name": smoke_name, "network": "none"},
+        {"container_name": smoke_name, "isolation": isolation},
     )
     smoke = docker.run_smoke(
         image_tag=tag,
@@ -298,6 +303,7 @@ def initialize_task(
         "image_id": metadata.image_id,
         "repository_commit": metadata.repository_commit,
         "reused": reused,
+        "isolation": isolation,
         "smoke": {
             "command": bundle.manifest.environment.smoke_command,
             "exit_code": smoke.exit_code,

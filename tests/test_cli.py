@@ -8,6 +8,9 @@ from typer.testing import CliRunner
 
 from taskbundle.cli import app
 from taskbundle.errors import InfrastructureError
+from taskbundle.models import TestObservation as Observation
+from taskbundle.models import TestResult as Result
+from taskbundle.session import CommandSession
 
 runner = CliRunner()
 FULL_COMMIT = "0123456789abcdef0123456789abcdef01234567"
@@ -78,6 +81,82 @@ def test_logs_returns_target_command(
     assert logs_code == 0
     assert logs_report["data"]["command"]["id"] == target_id
     assert logs_report["data"]["events"][-1]["level"] == "error"
+
+
+def test_logs_human_output_includes_tests_and_artifacts(valid_bundle_path: Path) -> None:
+    session = CommandSession.start(command_name="synthetic", bundle_path=valid_bundle_path)
+    session.attach_bundle("minimal-python")
+    session.database.add_test_result(
+        command_id=session.command_id,
+        result=Result(
+            phase="post_solver",
+            suite="fail_to_pass",
+            test_id="subtracts",
+            attempt=1,
+            expected=Observation.PASS,
+            observed=Observation.PASS,
+            exit_code=0,
+            duration_seconds=0.1,
+            log_artifact="commands/example/tests/subtracts.log",
+        ),
+    )
+    session.artifacts.write_text(
+        command_id=session.command_id,
+        relative_path="evidence.txt",
+        content="passed\n",
+        kind="evidence",
+    )
+    target_id = session.command_id
+    session.succeed({"resolved": True})
+    session.close()
+
+    result = runner.invoke(app, ["logs", target_id, "--bundle", str(valid_bundle_path)])
+
+    assert result.exit_code == 0, result.output
+    assert "Test results" in result.output
+    assert "subtracts" in result.output
+    assert "Artifacts" in result.output
+    assert "evidence.txt" in result.output
+
+
+def test_logs_missing_id_has_a_recovery_hint(valid_bundle_path: Path) -> None:
+    result = runner.invoke(app, ["logs", "missing-id", "--bundle", str(valid_bundle_path)])
+
+    assert result.exit_code == 2
+    assert "Command ID was not found: missing-id" in result.output
+    assert "Hint: Run `task history`" in result.output
+
+
+def test_artifacts_verifies_target_and_detects_tampering(valid_bundle_path: Path) -> None:
+    session = CommandSession.start(command_name="synthetic", bundle_path=valid_bundle_path)
+    session.attach_bundle("minimal-python")
+    artifact = session.artifacts.write_text(
+        command_id=session.command_id,
+        relative_path="evidence.txt",
+        content="trusted evidence\n",
+        kind="evidence",
+    )
+    target_id = session.command_id
+    session.succeed({"artifact": str(artifact)})
+    session.close()
+
+    verified_code, verified = invoke_json(
+        "artifacts", target_id, "--bundle", str(valid_bundle_path)
+    )
+    assert verified_code == 0
+    assert verified["data"]["valid"] is True
+    assert verified["data"]["count"] == 2
+    assert {item["status"] for item in verified["data"]["artifacts"]} == {"ok"}
+
+    artifact.write_text("tampered\n", encoding="utf-8")
+    failed_code, failed = invoke_json("artifacts", target_id, "--bundle", str(valid_bundle_path))
+    assert failed_code == 1
+    assert failed["error"]["kind"] == "invalid_task"
+    failures = failed["error"]["details"]["artifacts"]
+    assert (
+        next(item for item in failures if item["relative_path"].endswith("evidence.txt"))["status"]
+        == "mismatch"
+    )
 
 
 def test_keyboard_interrupt_is_persisted_as_infrastructure_failure(

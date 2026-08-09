@@ -4,11 +4,63 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 from taskbundle.database import Database
 from taskbundle.errors import InfrastructureError
+
+
+def verify_artifact_records(
+    *, state_dir: Path, records: Sequence[Mapping[str, Any]]
+) -> dict[str, Any]:
+    root = state_dir.resolve()
+    checks: list[dict[str, Any]] = []
+    for record in records:
+        relative_path = str(record["relative_path"])
+        candidate = (root / relative_path).resolve()
+        safe = candidate.is_relative_to(root)
+        exists = safe and candidate.is_file()
+        actual_sha256: str | None = None
+        actual_size_bytes: int | None = None
+        if exists:
+            digest = hashlib.sha256()
+            try:
+                with candidate.open("rb") as source:
+                    for block in iter(lambda: source.read(1024 * 1024), b""):
+                        digest.update(block)
+                actual_size_bytes = candidate.stat().st_size
+            except OSError as error:
+                raise InfrastructureError(
+                    f"Could not verify artifact {relative_path}: {error}"
+                ) from error
+            actual_sha256 = digest.hexdigest()
+
+        if not safe:
+            status = "unsafe_path"
+        elif not exists:
+            status = "missing"
+        elif actual_sha256 != record["sha256"] or actual_size_bytes != record["size_bytes"]:
+            status = "mismatch"
+        else:
+            status = "ok"
+        checks.append(
+            {
+                "kind": record["kind"],
+                "relative_path": relative_path,
+                "status": status,
+                "expected_sha256": record["sha256"],
+                "actual_sha256": actual_sha256,
+                "expected_size_bytes": record["size_bytes"],
+                "actual_size_bytes": actual_size_bytes,
+            }
+        )
+    return {
+        "valid": all(check["status"] == "ok" for check in checks),
+        "count": len(checks),
+        "artifacts": checks,
+    }
 
 
 class ArtifactStore:

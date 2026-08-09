@@ -1,0 +1,99 @@
+{
+  "schema_version": 1,
+  "task_id": "swebench-pro-ansible-12734fa2",
+  "dataset_instance_id": "instance_ansible__ansible-12734fa21c08a0ce8c84e533abdc560db2eb1955-v7eee2454f617569fd6889f2211f75bc02a35f9f8",
+  "resolved": true,
+  "source_run": {
+    "command_id": "20260809T194247906772Z-7e578b0b",
+    "solver": "patch",
+    "repetitions": 1,
+    "execution_fingerprint": "c439441861c36f55f61900956790c151ae1df8fa3735fd5ba495fbbad354d6e0",
+    "patch_sha256": "787d63373c26ae760362464bc2b763771b51f83a1e61df830bb996bf5c72f7b3"
+  },
+  "phases": {
+    "baseline": [
+      {
+        "suite": "pass_to_pass",
+        "test_id": "vault-encrypted-unicode",
+        "expected": "pass",
+        "observed": "pass",
+        "matched": true
+      },
+      {
+        "suite": "pass_to_pass",
+        "test_id": "bytes",
+        "expected": "pass",
+        "observed": "pass",
+        "matched": true
+      },
+      {
+        "suite": "pass_to_pass",
+        "test_id": "unicode",
+        "expected": "pass",
+        "observed": "pass",
+        "matched": true
+      },
+      {
+        "suite": "pass_to_pass",
+        "test_id": "vars-with-sources",
+        "expected": "pass",
+        "observed": "pass",
+        "matched": true
+      },
+      {
+        "suite": "fail_to_pass",
+        "test_id": "undefined-yaml-value",
+        "expected": "fail",
+        "observed": "fail",
+        "matched": true
+      }
+    ],
+    "post_solver": [
+      {
+        "suite": "pass_to_pass",
+        "test_id": "vault-encrypted-unicode",
+        "expected": "pass",
+        "observed": "pass",
+        "matched": true
+      },
+      {
+        "suite": "pass_to_pass",
+        "test_id": "bytes",
+        "expected": "pass",
+        "observed": "pass",
+        "matched": true
+      },
+      {
+        "suite": "pass_to_pass",
+        "test_id": "unicode",
+        "expected": "pass",
+        "observed": "pass",
+        "matched": true
+      },
+      {
+        "suite": "pass_to_pass",
+        "test_id": "vars-with-sources",
+        "expected": "pass",
+        "observed": "pass",
+        "matched": true
+      },
+      {
+        "suite": "fail_to_pass",
+        "test_id": "undefined-yaml-value",
+        "expected": "pass",
+        "observed": "pass",
+        "matched": true
+      }
+    ]
+  },
+  "summary": {
+    "baseline": {
+      "matched": 5,
+      "total": 5
+    },
+    "post_solver": {
+      "passed": 5,
+      "total": 5
+    }
+  }
+}

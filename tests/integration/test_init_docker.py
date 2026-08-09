@@ -95,6 +95,16 @@ def test_task_init_builds_smokes_reuses_and_cleans_up(valid_bundle_path: Path) -
         command_report = json.loads(command_run.stdout)
         assert command_report["data"]["resolved"] is True
         assert command_report["data"]["solver"]["patch_bytes"] > 0
+        pristine_snapshots = [
+            bundle / ".taskbundle" / artifact
+            for artifact in command_report["data"]["snapshot_artifacts"]
+            if artifact.endswith("-pristine.json")
+        ]
+        assert len(pristine_snapshots) == 3
+        for snapshot_path in pristine_snapshots:
+            snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+            assert snapshot["head_matches_base"] is True
+            assert snapshot["dirty"] is False
         command_patch = (
             bundle / ".taskbundle" / command_report["data"]["solver"]["patch_artifact"]
         ).read_text(encoding="utf-8")
@@ -151,6 +161,22 @@ def test_task_init_builds_smokes_reuses_and_cleans_up(valid_bundle_path: Path) -
         assert len(run_logs_report["data"]["test_results"]) == 4
         artifact_kinds = {artifact["kind"] for artifact in run_logs_report["data"]["artifacts"]}
         assert {"solver_patch", "repository_status", "run_report"} <= artifact_kinds
+
+        artifacts = runner.invoke(
+            app,
+            [
+                "artifacts",
+                command_report["command_id"],
+                "--bundle",
+                str(bundle),
+                "--json",
+            ],
+        )
+        assert artifacts.exit_code == 0, artifacts.output
+        artifacts_report = json.loads(artifacts.stdout)
+        assert artifacts_report["data"]["valid"] is True
+        assert artifacts_report["data"]["count"] > 0
+        assert {item["status"] for item in artifacts_report["data"]["artifacts"]} == {"ok"}
 
         image_tag = first_report["data"]["image_tag"]
         inspect = subprocess.run(

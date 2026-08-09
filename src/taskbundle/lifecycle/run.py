@@ -13,7 +13,9 @@ from taskbundle.errors import ConfigurationError, InvalidTaskError, SolverError,
 from taskbundle.lifecycle.initialize import container_name, require_initialized_build
 from taskbundle.lifecycle.validate import run_evaluation_phase, summarize_executions
 from taskbundle.process import ProcessRunner, Runner
+from taskbundle.provenance import sha256_path, sha256_text, write_execution_provenance
 from taskbundle.session import CommandSession
+from taskbundle.snapshots import capture_repository_snapshot, repository_snapshot_artifacts
 from taskbundle.solvers import CommandSolver, PatchSolver, Solver, SolverContext, StubSolver
 
 SECRET_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -177,6 +179,26 @@ def run_task(
         executable=os.environ.get("TASKBUNDLE_DOCKER_BIN", "docker"),
     )
     metadata = require_initialized_build(bundle=bundle, state_dir=session.state_dir, docker=docker)
+    effective_network = allow_network and bundle.manifest.runtime.solver_network
+    solver_provenance: dict[str, Any] = {
+        "adapter": solver.name,
+        "network": "bridge" if effective_network else "none",
+        "secret_environment_names": secret_names,
+    }
+    if solver_command is not None:
+        solver_provenance["command_sha256"] = sha256_text(solver_command)
+    if candidate_patch is not None:
+        solver_provenance["candidate_patch_sha256"] = sha256_path(
+            candidate_patch.expanduser().resolve()
+        )
+    provenance = write_execution_provenance(
+        bundle=bundle,
+        metadata=metadata,
+        session=session,
+        command="run",
+        repetitions=selected_repetitions,
+        solver=solver_provenance,
+    )
     session.event(
         "info",
         "preflight",
@@ -200,6 +222,20 @@ def run_task(
         "image_id": metadata.image_id,
         "repetitions": selected_repetitions,
         "baseline": baseline_summary,
+        "provenance": provenance,
+        "isolation": {
+            "evaluator": docker.isolation_profile(
+                runtime=bundle.manifest.runtime,
+                workdir=bundle.manifest.environment.workdir,
+                network="none",
+            ),
+            "solver": docker.isolation_profile(
+                runtime=bundle.manifest.runtime,
+                workdir=bundle.manifest.environment.workdir,
+                network="bridge" if effective_network else "none",
+            ),
+        },
+        "snapshot_artifacts": repository_snapshot_artifacts(session),
     }
     if not baseline_summary["valid"]:
         report_path = _write_run_report(session, partial)
@@ -209,7 +245,6 @@ def run_task(
             details=partial,
         )
 
-    effective_network = allow_network and bundle.manifest.runtime.solver_network
     solver_container = docker.create_solver(
         image_tag=metadata.image_tag,
         container_name=container_name(bundle.manifest.id, f"{session.command_id}-solver"),
@@ -224,7 +259,7 @@ def run_task(
         {
             "container_id": solver_container,
             "adapter": solver.name,
-            "network": "bridge" if effective_network else "none",
+            "isolation": partial["isolation"]["solver"],
             "secret_environment_names": secret_names,
         },
     )
@@ -234,12 +269,22 @@ def run_task(
     patch_bytes = 0
     status_artifact: str | None = None
     try:
-        docker.copy_file(
+        docker.start_detached(solver_container)
+        docker.stream_file(
             source=bundle.description_path,
             container_id=solver_container,
             destination="/tmp/taskbundle-description.md",
         )
-        docker.start_detached(solver_container)
+        capture_repository_snapshot(
+            docker=docker,
+            session=session,
+            container_id=solver_container,
+            workdir=bundle.manifest.environment.workdir,
+            base_commit=bundle.manifest.repository.commit,
+            phase="solver",
+            stage="pristine",
+            require_pristine=True,
+        )
         outcome = solver.solve(
             SolverContext(
                 docker=docker,
@@ -262,6 +307,15 @@ def run_task(
             kind="solver_stderr",
         )
         if not outcome.process.timed_out:
+            capture_repository_snapshot(
+                docker=docker,
+                session=session,
+                container_id=solver_container,
+                workdir=bundle.manifest.environment.workdir,
+                base_commit=bundle.manifest.repository.commit,
+                phase="solver",
+                stage="complete",
+            )
             patch_path, patch_bytes, status_artifact = _capture_patch(
                 docker=docker,
                 session=session,
@@ -294,6 +348,7 @@ def run_task(
 
     assert outcome is not None
     if outcome.process.timed_out:
+        partial["snapshot_artifacts"] = repository_snapshot_artifacts(session)
         report_path = _write_run_report(session, partial)
         raise SolverError(
             "The solver timed out before a patch could be graded.",
@@ -301,6 +356,7 @@ def run_task(
             details=partial,
         )
     if outcome.process.exit_code != 0:
+        partial["snapshot_artifacts"] = repository_snapshot_artifacts(session)
         report_path = _write_run_report(session, partial)
         raise SolverError(
             "The solver process exited unsuccessfully.",
@@ -320,6 +376,7 @@ def run_task(
     post_summary = summarize_executions(post_solver)
     partial["post_solver"] = post_summary
     partial["resolved"] = post_summary["valid"]
+    partial["snapshot_artifacts"] = repository_snapshot_artifacts(session)
     report_path = _write_run_report(session, partial)
     if not post_summary["valid"]:
         raise UnresolvedError(

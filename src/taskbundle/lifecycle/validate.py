@@ -13,7 +13,9 @@ from taskbundle.errors import InvalidTaskError, SolverError
 from taskbundle.lifecycle.initialize import container_name, require_initialized_build
 from taskbundle.models import TestObservation, TestResult, TestSpec
 from taskbundle.process import ProcessResult, ProcessRunner, Runner
+from taskbundle.provenance import write_execution_provenance
 from taskbundle.session import CommandSession
+from taskbundle.snapshots import capture_repository_snapshot, repository_snapshot_artifacts
 
 Phase = Literal["baseline", "golden", "post_solver"]
 Suite = Literal["pass_to_pass", "fail_to_pass"]
@@ -186,28 +188,46 @@ def run_evaluation_phase(
         "info",
         phase,
         "Evaluator container created.",
-        {"container_name": name, "container_id": container_id, "network": "none"},
+        {
+            "container_name": name,
+            "container_id": container_id,
+            "isolation": docker.isolation_profile(
+                runtime=bundle.manifest.runtime,
+                workdir=bundle.manifest.environment.workdir,
+                network="none",
+            ),
+        },
     )
     executions: list[TestExecution] = []
     try:
+        docker.start_detached(container_id)
+        capture_repository_snapshot(
+            docker=docker,
+            session=session,
+            container_id=container_id,
+            workdir=bundle.manifest.environment.workdir,
+            base_commit=bundle.manifest.repository.commit,
+            phase=phase,
+            stage="pristine",
+            require_pristine=True,
+        )
         if phase == "golden":
-            docker.copy_file(
+            docker.stream_file(
                 source=bundle.gold_patch_path,
                 container_id=container_id,
                 destination="/tmp/taskbundle-gold.patch",
             )
         elif candidate_patch is not None:
-            docker.copy_file(
+            docker.stream_file(
                 source=candidate_patch,
                 container_id=container_id,
                 destination="/tmp/taskbundle-candidate.patch",
             )
-        docker.copy_file(
+        docker.stream_file(
             source=bundle.test_patch_path,
             container_id=container_id,
             destination="/tmp/taskbundle-tests.patch",
         )
-        docker.start_detached(container_id)
         if phase == "golden":
             _apply_patch(
                 docker=docker,
@@ -229,6 +249,16 @@ def run_evaluation_phase(
                 artifact_name=f"{phase}-candidate",
                 solver_owned=True,
             )
+        if phase == "golden" or candidate_patch is not None:
+            capture_repository_snapshot(
+                docker=docker,
+                session=session,
+                container_id=container_id,
+                workdir=bundle.manifest.environment.workdir,
+                base_commit=bundle.manifest.repository.commit,
+                phase=phase,
+                stage="solution-applied",
+            )
         _apply_patch(
             docker=docker,
             session=session,
@@ -237,6 +267,15 @@ def run_evaluation_phase(
             container_patch_path="/tmp/taskbundle-tests.patch",
             label="hidden test patch",
             artifact_name=f"{phase}-hidden-tests",
+        )
+        capture_repository_snapshot(
+            docker=docker,
+            session=session,
+            container_id=container_id,
+            workdir=bundle.manifest.environment.workdir,
+            base_commit=bundle.manifest.repository.commit,
+            phase=phase,
+            stage="hidden-tests-applied",
         )
 
         suites: tuple[tuple[Suite, list[TestSpec]], ...] = (
@@ -272,6 +311,15 @@ def run_evaluation_phase(
                                 "log_artifact": execution.result.log_artifact,
                             },
                         )
+        capture_repository_snapshot(
+            docker=docker,
+            session=session,
+            container_id=container_id,
+            workdir=bundle.manifest.environment.workdir,
+            base_commit=bundle.manifest.repository.commit,
+            phase=phase,
+            stage="after-tests",
+        )
     finally:
         docker.remove_container(container_id)
         session.event(
@@ -347,6 +395,13 @@ def validate_task(
         "Initialized image verified.",
         {"image_tag": metadata.image_tag, "image_id": metadata.image_id},
     )
+    provenance = write_execution_provenance(
+        bundle=bundle,
+        metadata=metadata,
+        session=session,
+        command="validate",
+        repetitions=selected_repetitions,
+    )
 
     executions: list[TestExecution] = []
     for phase in ("baseline", "golden"):
@@ -367,6 +422,13 @@ def validate_task(
         "image_tag": metadata.image_tag,
         "image_id": metadata.image_id,
         "repetitions": selected_repetitions,
+        "provenance": provenance,
+        "isolation": docker.isolation_profile(
+            runtime=bundle.manifest.runtime,
+            workdir=bundle.manifest.environment.workdir,
+            network="none",
+        ),
+        "snapshot_artifacts": repository_snapshot_artifacts(session),
         **summary,
     }
     validation_artifact = session.artifacts.write_json(

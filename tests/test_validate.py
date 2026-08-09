@@ -38,9 +38,18 @@ def process_result(
 
 
 class ValidationRunner:
-    def __init__(self, *, flaky: bool = False, patch_failure: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        base_commit: str,
+        flaky: bool = False,
+        patch_failure: bool = False,
+        dirty_pristine: bool = False,
+    ) -> None:
+        self.base_commit = base_commit
         self.flaky = flaky
         self.patch_failure = patch_failure
+        self.dirty_pristine = dirty_pristine
         self.calls: list[tuple[str, ...]] = []
         self.container_phases: dict[str, str] = {}
         self.test_attempts: defaultdict[tuple[str, str], int] = defaultdict(int)
@@ -67,7 +76,9 @@ class ValidationRunner:
             container_id = f"{phase}-container"
             self.container_phases[container_id] = phase
             return process_result(argv, stdout=f"{container_id}\n")
-        if argv[1] in {"cp", "start", "rm"}:
+        if argv[1:3] == ["exec", "--interactive"]:
+            return process_result(argv)
+        if argv[1] in {"start", "rm"}:
             return process_result(argv)
         if argv[1] != "exec":
             raise AssertionError(f"Unexpected Docker command: {command}")
@@ -75,6 +86,13 @@ class ValidationRunner:
         container_id = argv[4]
         phase = self.container_phases[container_id]
         inner = list(argv[5:])
+        if inner[:3] == ["git", "rev-parse", "HEAD"]:
+            return process_result(argv, stdout=f"{self.base_commit}\n")
+        if inner[:2] == ["git", "status"]:
+            status = " M calculator.py\n" if self.dirty_pristine else ""
+            return process_result(argv, stdout=status)
+        if inner[:3] == ["git", "diff", "--stat"]:
+            return process_result(argv, stdout="calculator.py | 2 +-\n")
         if inner[:3] == ["git", "apply", "--check"]:
             if self.patch_failure and phase == "baseline":
                 return process_result(argv, exit_code=1, stderr="patch does not apply\n")
@@ -130,7 +148,7 @@ def start_validation_session(bundle: Bundle) -> CommandSession:
 def test_validate_records_full_baseline_and_golden_matrix(valid_bundle_path: Path) -> None:
     bundle = load_bundle(valid_bundle_path)
     write_initialized_metadata(bundle)
-    runner = ValidationRunner()
+    runner = ValidationRunner(base_commit=bundle.manifest.repository.commit)
     session = start_validation_session(bundle)
     try:
         result = validate_task(bundle=bundle, session=session, runner=runner)
@@ -148,13 +166,20 @@ def test_validate_records_full_baseline_and_golden_matrix(valid_bundle_path: Pat
     assert len([call for call in runner.calls if call[1] == "create"]) == 2
     assert len([call for call in runner.calls if call[1] == "rm"]) == 2
     assert len([artifact for artifact in artifacts if artifact["kind"] == "patch_log"]) == 6
+    assert (
+        len([artifact for artifact in artifacts if artifact["kind"] == "repository_snapshot"]) == 7
+    )
+    assert (
+        len([artifact for artifact in artifacts if artifact["kind"] == "execution_provenance"]) == 1
+    )
+    assert len(result["snapshot_artifacts"]) == 7
     assert all((bundle.root / ".taskbundle" / row["log_artifact"]).is_file() for row in rows)
 
 
 def test_validate_rejects_inconsistent_repeated_outcomes(valid_bundle_path: Path) -> None:
     bundle = load_bundle(valid_bundle_path)
     write_initialized_metadata(bundle)
-    runner = ValidationRunner(flaky=True)
+    runner = ValidationRunner(base_commit=bundle.manifest.repository.commit, flaky=True)
     session = start_validation_session(bundle)
     try:
         with pytest.raises(InvalidTaskError) as caught:
@@ -173,7 +198,7 @@ def test_validate_rejects_inconsistent_repeated_outcomes(valid_bundle_path: Path
 def test_patch_preflight_failure_still_removes_evaluator(valid_bundle_path: Path) -> None:
     bundle = load_bundle(valid_bundle_path)
     write_initialized_metadata(bundle)
-    runner = ValidationRunner(patch_failure=True)
+    runner = ValidationRunner(base_commit=bundle.manifest.repository.commit, patch_failure=True)
     session = start_validation_session(bundle)
     try:
         with pytest.raises(InvalidTaskError, match="cannot be applied cleanly") as caught:
@@ -184,5 +209,28 @@ def test_patch_preflight_failure_still_removes_evaluator(valid_bundle_path: Path
         session.close()
 
     removals = [call for call in runner.calls if call[1] == "rm"]
-    assert removals == [("docker", "rm", "--force", "baseline-container")]
+    assert removals == [("docker", "rm", "--force", "--volumes", "baseline-container")]
     assert len([artifact for artifact in artifacts if artifact["kind"] == "patch_log"]) == 1
+
+
+def test_validate_rejects_a_dirty_initialized_repository(valid_bundle_path: Path) -> None:
+    bundle = load_bundle(valid_bundle_path)
+    write_initialized_metadata(bundle)
+    runner = ValidationRunner(
+        base_commit=bundle.manifest.repository.commit,
+        dirty_pristine=True,
+    )
+    session = start_validation_session(bundle)
+    try:
+        with pytest.raises(InvalidTaskError, match="not pristine") as caught:
+            validate_task(bundle=bundle, session=session, runner=runner)
+        session.fail(caught.value)
+    finally:
+        session.close()
+
+    assert caught.value.details["dirty"] is True
+    assert caught.value.details["status"] == [" M calculator.py"]
+    assert caught.value.details["snapshot_artifact"].endswith("baseline-pristine.json")
+    assert [call for call in runner.calls if call[1] == "rm"] == [
+        ("docker", "rm", "--force", "--volumes", "baseline-container")
+    ]

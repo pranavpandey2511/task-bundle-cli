@@ -55,16 +55,21 @@ class RunRunner:
     def __init__(
         self,
         *,
+        base_commit: str,
         solver_timeout: bool = False,
         solver_changes: bool = False,
         solver_interrupt: bool = False,
+        breaks_regression: bool = False,
     ) -> None:
+        self.base_commit = base_commit
         self.solver_timeout = solver_timeout
         self.solver_changes = solver_changes
         self.solver_interrupt = solver_interrupt
+        self.breaks_regression = breaks_regression
         self.calls: list[tuple[str, ...]] = []
         self.container_phases: dict[str, str] = {}
         self.has_candidate = False
+        self.solver_completed = False
 
     @staticmethod
     def _exec_parts(argv: Sequence[str]) -> tuple[str, list[str]]:
@@ -100,8 +105,8 @@ class RunRunner:
             container_id = f"{phase}-container"
             self.container_phases[container_id] = phase
             return process_result(argv, stdout=f"{container_id}\n")
-        if argv[1] == "cp":
-            if argv[-1].endswith(":/tmp/taskbundle-candidate.patch"):
+        if argv[1:3] == ["exec", "--interactive"]:
+            if argv[-1] == "/tmp/taskbundle-candidate.patch":
                 self.has_candidate = True
             return process_result(argv)
         if argv[1] in {"start", "rm"}:
@@ -117,10 +122,20 @@ class RunRunner:
                     raise KeyboardInterrupt
                 if self.solver_timeout:
                     return process_result(argv, exit_code=None, timed_out=True)
+                self.solver_completed = True
                 return process_result(argv, stdout="solver completed\n")
+            if inner[:3] == ["git", "rev-parse", "HEAD"]:
+                return process_result(argv, stdout=f"{self.base_commit}\n")
             if inner[:2] == ["git", "status"]:
-                status = " M calculator.py\n?? solver-note.txt\n" if self.solver_changes else ""
+                status = (
+                    " M calculator.py\n?? solver-note.txt\n"
+                    if self.solver_changes and self.solver_completed
+                    else ""
+                )
                 return process_result(argv, stdout=status)
+            if inner[:3] == ["git", "diff", "--stat"]:
+                stat = "calculator.py | 2 +-\n" if self.solver_changes else ""
+                return process_result(argv, stdout=stat)
             if inner[:3] == ["git", "add", "-A"]:
                 return process_result(argv)
             if inner[:3] == ["git", "diff", "--cached"]:
@@ -131,10 +146,18 @@ class RunRunner:
             return process_result(argv)
         if inner[:2] == ["git", "apply"]:
             return process_result(argv)
+        if inner[:3] == ["git", "rev-parse", "HEAD"]:
+            return process_result(argv, stdout=f"{self.base_commit}\n")
+        if inner[:2] == ["git", "status"]:
+            return process_result(argv)
+        if inner[:3] == ["git", "diff", "--stat"]:
+            return process_result(argv)
         test_command = inner[-1]
         is_subtract = "test_subtracts" in test_command
         if phase == "baseline" and is_subtract:
             return process_result(argv, exit_code=1, stderr="expected baseline failure\n")
+        if phase == "post_solver" and not is_subtract and self.breaks_regression:
+            return process_result(argv, exit_code=1, stderr="regression introduced\n")
         if phase == "post_solver" and is_subtract and not self.has_candidate:
             return process_result(argv, exit_code=1, stderr="not fixed\n")
         return process_result(argv, stdout="ok\n")
@@ -169,7 +192,7 @@ def start_run_session(bundle: Bundle) -> CommandSession:
 def test_stub_run_is_unresolved_and_cleans_up_all_containers(valid_bundle_path: Path) -> None:
     bundle = load_bundle(valid_bundle_path)
     write_initialized_metadata(bundle)
-    runner = RunRunner()
+    runner = RunRunner(base_commit=bundle.manifest.repository.commit)
     session = start_run_session(bundle)
     try:
         with pytest.raises(UnresolvedError) as caught:
@@ -186,12 +209,16 @@ def test_stub_run_is_unresolved_and_cleans_up_all_containers(valid_bundle_path: 
     assert len([call for call in runner.calls if call[1] == "create"]) == 3
     assert len([call for call in runner.calls if call[1] == "rm"]) == 3
     assert any(artifact["kind"] == "run_report" for artifact in artifacts)
+    assert any(artifact["kind"] == "execution_provenance" for artifact in artifacts)
+    assert (
+        len([artifact for artifact in artifacts if artifact["kind"] == "repository_snapshot"]) == 8
+    )
 
 
 def test_command_run_resolves_and_captures_untracked_files(valid_bundle_path: Path) -> None:
     bundle = load_bundle(valid_bundle_path)
     write_initialized_metadata(bundle)
-    runner = RunRunner(solver_changes=True)
+    runner = RunRunner(base_commit=bundle.manifest.repository.commit, solver_changes=True)
     session = start_run_session(bundle)
     try:
         result = run_task(
@@ -212,6 +239,8 @@ def test_command_run_resolves_and_captures_untracked_files(valid_bundle_path: Pa
     assert result["resolved"] is True
     assert "solver-note.txt" in patch
     assert result["solver"]["patch_bytes"] == len(CANDIDATE_PATCH.encode())
+    assert len(result["snapshot_artifacts"]) == 9
+    assert len(result["provenance"]["execution_fingerprint"]) == 64
     assert any(
         call[-6:] == ("git", "diff", "--cached", "--binary", "--full-index", "--no-ext-diff")
         for call in runner.calls
@@ -221,7 +250,7 @@ def test_command_run_resolves_and_captures_untracked_files(valid_bundle_path: Pa
 def test_solver_timeout_is_solver_error_and_skips_post_grading(valid_bundle_path: Path) -> None:
     bundle = load_bundle(valid_bundle_path)
     write_initialized_metadata(bundle)
-    runner = RunRunner(solver_timeout=True)
+    runner = RunRunner(base_commit=bundle.manifest.repository.commit, solver_timeout=True)
     session = start_run_session(bundle)
     try:
         with pytest.raises(SolverError, match="timed out") as caught:
@@ -244,7 +273,7 @@ def test_solver_timeout_is_solver_error_and_skips_post_grading(valid_bundle_path
 def test_solver_interrupt_still_removes_solver_container(valid_bundle_path: Path) -> None:
     bundle = load_bundle(valid_bundle_path)
     write_initialized_metadata(bundle)
-    runner = RunRunner(solver_interrupt=True)
+    runner = RunRunner(base_commit=bundle.manifest.repository.commit, solver_interrupt=True)
     session = start_run_session(bundle)
     try:
         with pytest.raises(KeyboardInterrupt):
@@ -261,8 +290,8 @@ def test_solver_interrupt_still_removes_solver_container(valid_bundle_path: Path
 
     removals = [call for call in runner.calls if call[1] == "rm"]
     assert removals == [
-        ("docker", "rm", "--force", "baseline-container"),
-        ("docker", "rm", "--force", "solver-container"),
+        ("docker", "rm", "--force", "--volumes", "baseline-container"),
+        ("docker", "rm", "--force", "--volumes", "solver-container"),
     ]
 
 
@@ -271,7 +300,12 @@ def test_network_needs_manifest_and_cli_consent(valid_bundle_path: Path) -> None
     session = start_run_session(bundle)
     try:
         with pytest.raises(ConfigurationError, match="disabled by this bundle"):
-            run_task(bundle=bundle, session=session, allow_network=True, runner=RunRunner())
+            run_task(
+                bundle=bundle,
+                session=session,
+                allow_network=True,
+                runner=RunRunner(base_commit=bundle.manifest.repository.commit),
+            )
     finally:
         session.close()
 
@@ -280,3 +314,36 @@ def test_solver_command_is_redacted_from_command_arguments() -> None:
     arguments = ["run", ".", "--solver-cmd", "agent --token sensitive", "--json"]
 
     assert sanitize_arguments(arguments) == ["run", ".", "--solver-cmd", "<redacted>", "--json"]
+
+
+def test_run_reports_a_fixed_target_and_broken_regression(valid_bundle_path: Path) -> None:
+    bundle = load_bundle(valid_bundle_path)
+    write_initialized_metadata(bundle)
+    runner = RunRunner(
+        base_commit=bundle.manifest.repository.commit,
+        solver_changes=True,
+        breaks_regression=True,
+    )
+    session = start_run_session(bundle)
+    try:
+        with pytest.raises(UnresolvedError) as caught:
+            run_task(
+                bundle=bundle,
+                session=session,
+                solver_name="command",
+                solver_command="fix-target-break-regression",
+                repetitions=1,
+                runner=runner,
+            )
+        session.fail(caught.value)
+    finally:
+        session.close()
+
+    post_solver = caught.value.details["post_solver"]
+    regression = post_solver["phases"]["post_solver"]["pass_to_pass"][0]
+    target = post_solver["phases"]["post_solver"]["fail_to_pass"][0]
+    assert regression["observations"] == ["fail"]
+    assert regression["matches"] is False
+    assert target["observations"] == ["pass"]
+    assert target["matches"] is True
+    assert caught.value.details["resolved"] is False

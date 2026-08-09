@@ -82,15 +82,42 @@ def test_smoke_container_is_isolated_and_removed_after_timeout() -> None:
     assert "--cap-drop" in create
     assert "ALL" in create
     assert "no-new-privileges:true" in create
+    assert "--read-only" in create
     assert "--volume" not in create
-    assert "--mount" not in create
-    assert runner.calls[-1] == ("docker", "rm", "--force", "container-123")
+    assert create[create.index("--mount") + 1] == "type=volume,destination=/workspace"
+    assert create[create.index("--tmpfs") + 1] == "/tmp:rw,nosuid,nodev,size=512m"
+    assert "HOME=/tmp/taskbundle-home" in create
+    assert "XDG_CACHE_HOME=/tmp/taskbundle-cache" in create
+    assert runner.calls[-1] == (
+        "docker",
+        "rm",
+        "--force",
+        "--volumes",
+        "container-123",
+    )
 
 
 def test_missing_image_is_not_an_infrastructure_error() -> None:
     runner = SequenceRunner([result([], exit_code=1, stderr="Error: No such image: missing")])
 
     assert DockerClient(runner).inspect_image("missing") is None
+
+
+def test_container_inputs_are_streamed_without_docker_cp(tmp_path: Path) -> None:
+    source = tmp_path / "input.patch"
+    source.write_text("patch contents\n", encoding="utf-8")
+    runner = SequenceRunner([result([])])
+
+    DockerClient(runner).stream_file(
+        source=source,
+        container_id="container-123",
+        destination="/tmp/taskbundle-input.patch",
+    )
+
+    command = runner.calls[0]
+    assert command[:3] == ("docker", "exec", "--interactive")
+    assert command[-1] == "/tmp/taskbundle-input.patch"
+    assert "cp" not in command
 
 
 def test_solver_network_and_secret_forwarding_are_explicit() -> None:
@@ -120,7 +147,8 @@ def test_solver_network_and_secret_forwarding_are_explicit() -> None:
     create = runner.calls[0]
     assert create[create.index("--network") + 1] == "bridge"
     assert "--volume" not in create
-    assert "--mount" not in create
+    assert create[create.index("--mount") + 1] == "type=volume,destination=/workspace"
+    assert "--read-only" in create
     execute = runner.calls[1]
     assert execute[4:6] == ("--env", "OPENAI_API_KEY")
     assert "TASKBUNDLE_DESCRIPTION=/tmp/description.md" in execute

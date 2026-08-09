@@ -149,12 +149,28 @@ class DockerClient:
         )
         self._require_success(result, action=f"start evaluator container {container_id}")
 
-    def copy_file(self, *, source: Path, container_id: str, destination: str) -> None:
+    def stream_file(self, *, source: Path, container_id: str, destination: str) -> None:
+        try:
+            content = source.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as error:
+            raise InfrastructureError(
+                f"Could not read container input {source}: {error}"
+            ) from error
         result = self.runner.run(
-            self._command("cp", str(source), f"{container_id}:{destination}"),
+            self._command(
+                "exec",
+                "--interactive",
+                container_id,
+                "/bin/sh",
+                "-c",
+                'umask 077 && cat > "$1"',
+                "taskbundle-copy",
+                destination,
+            ),
             timeout_seconds=60,
+            stdin=content,
         )
-        self._require_success(result, action=f"copy evaluator input to {destination}")
+        self._require_success(result, action=f"stream evaluator input to {destination}")
 
     def exec_command(
         self,
@@ -179,7 +195,7 @@ class DockerClient:
 
     def remove_container(self, container_id: str) -> None:
         result = self.runner.run(
-            self._command("rm", "--force", container_id),
+            self._command("rm", "--force", "--volumes", container_id),
             timeout_seconds=30,
         )
         self._require_success(result, action=f"remove evaluator container {container_id}")
@@ -218,7 +234,8 @@ class DockerClient:
             )
         finally:
             cleanup = self.runner.run(
-                self._command("rm", "--force", container_id), timeout_seconds=30
+                self._command("rm", "--force", "--volumes", container_id),
+                timeout_seconds=30,
             )
 
         if not cleanup.succeeded:
@@ -260,6 +277,19 @@ class DockerClient:
             "no-new-privileges:true",
             "--cap-drop",
             "ALL",
+            "--read-only",
+            "--tmpfs",
+            f"/tmp:rw,nosuid,nodev,size={runtime.tmpfs_size.lower()}",
+            "--env",
+            "HOME=/tmp/taskbundle-home",
+            "--env",
+            "XDG_CACHE_HOME=/tmp/taskbundle-cache",
+            "--env",
+            "XDG_CONFIG_HOME=/tmp/taskbundle-config",
+            "--env",
+            "XDG_DATA_HOME=/tmp/taskbundle-data",
+            "--mount",
+            f"type=volume,destination={workdir}",
             "--workdir",
             workdir,
         )
@@ -268,6 +298,24 @@ class DockerClient:
         create.append(image_tag)
         create.extend(container_command)
         return create
+
+    @staticmethod
+    def isolation_profile(*, runtime: RuntimeSpec, workdir: str, network: str) -> dict[str, object]:
+        return {
+            "network": network,
+            "read_only_rootfs": True,
+            "ephemeral_workdir": workdir,
+            "tmpfs": {"path": "/tmp", "size": runtime.tmpfs_size.lower()},
+            "ephemeral_home": "/tmp/taskbundle-home",
+            "ephemeral_xdg_dirs": True,
+            "cpus": runtime.cpus,
+            "memory": runtime.memory.lower(),
+            "pids": runtime.pids,
+            "capabilities": [],
+            "no_new_privileges": True,
+            "host_mounts": False,
+            "docker_socket": False,
+        }
 
     @staticmethod
     def _require_success(result: ProcessResult, *, action: str) -> None:

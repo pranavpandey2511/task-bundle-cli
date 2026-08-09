@@ -54,6 +54,7 @@
     "cpus": 2,
     "memory": "4g",
     "pids": 512,
+    "tmpfs_size": "512m",
     "solver_timeout_seconds": 1800,
     "max_patch_bytes": 10000000,
     "solver_network": false,
