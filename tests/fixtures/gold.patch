@@ -1,0 +1,8 @@
+diff --git a/calculator.py b/calculator.py
+--- a/calculator.py
++++ b/calculator.py
+@@ -8,3 +8,3 @@
+ def subtract(left: int, right: int) -> int:
+     """Return the difference between two integers."""
+-    return left + right
++    return left - right

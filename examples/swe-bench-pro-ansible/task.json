@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "id": "swebench-pro-ansible-12734fa2",
+  "repository": {
+    "url": "https://github.com/ansible/ansible.git",
+    "commit": "de01db08d00c8d2438e1ba5989c313ba16a145b0"
+  },
+  "environment": {
+    "dockerfile": "environment/Dockerfile",
+    "workdir": "/workspace",
+    "smoke_command": "python -m pytest -q test/units/parsing/yaml/test_dumper.py::TestAnsibleDumper::test_unicode",
+    "build_timeout_seconds": 3600,
+    "smoke_timeout_seconds": 300
+  },
+  "patches": {
+    "gold": "gold.patch",
+    "tests": "tests/hidden.patch"
+  },
+  "tests": {
+    "pass_to_pass": [
+      {
+        "id": "vault-encrypted-unicode",
+        "command": "python -m pytest -q test/units/parsing/yaml/test_dumper.py::TestAnsibleDumper::test_ansible_vault_encrypted_unicode",
+        "timeout_seconds": 300
+      },
+      {
+        "id": "bytes",
+        "command": "python -m pytest -q test/units/parsing/yaml/test_dumper.py::TestAnsibleDumper::test_bytes",
+        "timeout_seconds": 300
+      },
+      {
+        "id": "unicode",
+        "command": "python -m pytest -q test/units/parsing/yaml/test_dumper.py::TestAnsibleDumper::test_unicode",
+        "timeout_seconds": 300
+      },
+      {
+        "id": "vars-with-sources",
+        "command": "python -m pytest -q test/units/parsing/yaml/test_dumper.py::TestAnsibleDumper::test_vars_with_sources",
+        "timeout_seconds": 300
+      }
+    ],
+    "fail_to_pass": [
+      {
+        "id": "undefined-yaml-value",
+        "command": "python -m pytest -q test/units/parsing/yaml/test_dumper.py::TestAnsibleDumper::test_undefined",
+        "timeout_seconds": 300
+      }
+    ]
+  },
+  "validation": {
+    "repetitions": 3
+  },
+  "runtime": {
+    "cpus": 2,
+    "memory": "4g",
+    "pids": 512,
+    "solver_timeout_seconds": 1800,
+    "max_patch_bytes": 10000000,
+    "solver_network": false,
+    "user": null
+  }
+}

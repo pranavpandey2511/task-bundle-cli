@@ -1,0 +1,12 @@
+{
+  "dataset": "ScaleAI/SWE-bench_Pro",
+  "dataset_revision": "7ab5114912baf22bb098818e604c02fe7ad2c11f",
+  "harness": "scaleapi/SWE-bench_Pro-os",
+  "harness_revision": "ca10a60a5fcae51e6948ffe1485d4153d421e6c5",
+  "instance_id": "instance_ansible__ansible-12734fa21c08a0ce8c84e533abdc560db2eb1955-v7eee2454f617569fd6889f2211f75bc02a35f9f8",
+  "dockerhub_tag": "ansible.ansible-ansible__ansible-12734fa21c08a0ce8c84e533abdc560db2eb1955-v7eee2454f617569fd6889f2211f75bc02a35f9f8",
+  "docker_manifest_digest": "sha256:752a02f523e1ae644498a6b0895040992bc7990f5da1ab82a027af455c971bd0",
+  "local_base_image": "python:3.9-slim@sha256:2d97f6910b16bd338d3060f261f53f144965f755599aab1acda1e13cf1731b1b",
+  "environment_adaptation": "The official image is linux/amd64-only; the local ARM64 proof reconstructs its selected Python unit-test dependencies from pinned versions.",
+  "official_selected_test_file": "test/units/parsing/yaml/test_dumper.py"
+}

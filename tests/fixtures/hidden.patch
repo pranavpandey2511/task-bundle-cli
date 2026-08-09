@@ -1,0 +1,19 @@
+diff --git a/test_hidden.py b/test_hidden.py
+new file mode 100644
+--- /dev/null
++++ b/test_hidden.py
+@@ -0,0 +1,14 @@
++import unittest
++
++from calculator import add, subtract
++
++
++class HiddenTests(unittest.TestCase):
++    def test_add_remains_available(self) -> None:
++        self.assertEqual(add(10, 7), 17)
++
++    def test_subtracts(self) -> None:
++        self.assertEqual(subtract(10, 7), 3)
++
++
++HIDDEN_TEST_SENTINEL = "theta-hidden-evaluator-only"
