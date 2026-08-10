@@ -14,6 +14,23 @@ The bundle owns repository-specific behavior: its Dockerfile, smoke command, tes
 | SQLite and artifact files | Durable events, attempts, logs, hashes, and provenance. |
 | Reporting layer           | Diagnostics, static HTML review, and evidence export.   |
 
+## What a task bundle contains
+
+A bundle is a small, reviewable task package, not a copy of the target repository. For example, the included Ansible task has this shape:
+
+```text
+examples/swe-bench-pro-ansible/
+├── task.json                 # pinned repository, tests, limits, patch policy
+├── description.md            # problem given to a solver
+├── environment/Dockerfile    # reproducible evaluator runtime
+├── gold.patch                # known-good reference change
+└── tests/
+    ├── hidden.patch          # evaluator-only tests absent from the base commit
+    └── solver-view.patch     # removes evaluator files from solver source
+```
+
+`task.json` declares which tests must already pass and which must change from fail to pass. The bundle also names the narrow paths a candidate may modify. This lets the engine use the same lifecycle for Python, Node, Go, Rust, or another stack while task authors keep ownership of the repository-specific commands and test contract.
+
 ## Decisions at a glance
 
 | Decision                               | Reason                                                            | Cost                                                                |
@@ -23,7 +40,7 @@ The bundle owns repository-specific behavior: its Dockerfile, smoke command, tes
 | Separate evaluator and solver images   | Remove selected tests and original Git history before solving.    | Two image builds use more time and disk.                            |
 | Whole-file evaluator ownership         | Provides a verifiable, language-neutral secrecy rule.             | Public and private tests cannot share a file.                       |
 | Candidate path allow-list              | Prevent test, runner, or unrelated-file manipulation.             | The solution surface must be maintained explicitly.                 |
-| Host-mediated OpenRouter agent          | Keep model credentials and API traffic outside untrusted code.     | Agent output is model-dependent and consumes external API credits.  |
+| Optional host-mediated OpenRouter agent | Keep model credentials and API traffic outside untrusted code.     | Agent output is model-dependent and consumes external API credits.  |
 | Fresh container per attempt            | Prevent state leakage between tests and phases.                   | Evaluation is intentionally slower.                                 |
 | Static HTML reports over a web app     | Give reviewers a useful interface without another execution path. | Reports are local evaluator artifacts, not a collaboration service. |
 
@@ -40,7 +57,9 @@ The bundle owns repository-specific behavior: its Dockerfile, smoke command, tes
 
 Only exit code `0` is a pass. Configured assertion exits, normally `1`, are failures; timeouts and unexpected nonzero exits remain distinct errors. Every test is repeated in a fresh container and volume. All repetitions must agree, so a flaky test or broken runner cannot accidentally validate a task.
 
-`task run` repeats the baseline before invoking the solver. By default, the host calls OpenRouter and gives the selected model structured tools that operate only in the sanitized container. The agent can read source, write allowed candidate paths, and run direct commands; it cannot see evaluator inputs or receive general container networking. After solving, the engine stages tracked and non-ignored untracked changes, captures a binary/full-index Git patch, and destroys the solver container. Protected or out-of-policy paths are rejected before the patch is graded in fresh evaluator containers. A run resolves only when every post-solver observation is a stable pass.
+`task run` repeats the baseline before invoking one solver adapter. `agent` is the default and is the only adapter that needs optional OpenRouter configuration; the host gives that model structured tools for the sanitized container. `patch` instead grades a locally supplied patch, while `stub` deliberately makes no change to exercise the unresolved path. Every adapter produces the same review boundary: the engine captures a binary/full-index Git patch, destroys the solver container, rejects protected or out-of-policy paths, then grades the patch in fresh evaluator containers. A run resolves only when every post-solver observation is a stable pass.
+
+For example, `task run my-task --solver patch --candidate-patch fix.patch` is a fully local, reproducible positive-control path. `task run my-task --solver agent --model provider/model-id` is an optional live attempt that can consume credits and sends the problem plus model-requested source excerpts to OpenRouter. `task run my-task --solver stub` is useful when reviewing failure messages and reports without a candidate change.
 
 ## Test secrecy and trust boundary
 
