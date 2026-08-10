@@ -13,6 +13,8 @@ This repository contains:
 
 The project's architecture and design decisions are documented in [DESIGN.md](DESIGN.md). Start with its ["Decisions at a glance"](DESIGN.md#decisions-at-a-glance) section for a concise overview, then use the linked sections for the rationale, tradeoffs, and limits behind each choice.
 
+The proposed direction for supporting repositories beyond the Python examples is described in [General Repository Support](GENERAL_REPOSITORY_SUPPORT.md). This is a short future-work note, not a claim that arbitrary repository support has been completed in this assignment.
+
 ## Install
 
 Requirements:
