@@ -11,8 +11,8 @@
   "cli_version": "0.3.0",
   "solver_view_sha256": "88fb511150e3117bd617eb577bd407c14f7fdbf549c263d489f4ea0693fa718e",
   "initialized_command_id": "20260810T150335777560Z-9cfadd8e",
-  "validated_command_id": "20260810T150455755917Z-0f953428",
-  "resolved_run_command_id": "20260810T150513272923Z-3596adba",
+  "validated_command_id": "20260810T164515945418Z-3ef85d4b",
+  "resolved_run_command_id": "20260810T164527737672Z-45f4c42c",
   "environment_adaptation": "The official image is linux/amd64-only; the local ARM64 proof reconstructs its selected Python 3.11 unit-test dependencies from pinned versions.",
   "official_selected_test_file": "test/units/module_utils/common/validation/test_check_type_dict.py"
 }

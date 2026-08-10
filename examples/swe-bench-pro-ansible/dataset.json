@@ -11,8 +11,8 @@
   "cli_version": "0.3.0",
   "solver_view_sha256": "280e884c70e19af1db6c7eca83efde0b963ed147f5707014458d1fd7a743ead4",
   "initialized_command_id": "20260810T150105259806Z-af375e7d",
-  "validated_command_id": "20260810T150243115863Z-e51056ac",
-  "resolved_run_command_id": "20260810T150302696585Z-f6616b39",
+  "validated_command_id": "20260810T164444821115Z-e7ee4cea",
+  "resolved_run_command_id": "20260810T164458035453Z-841b8f79",
   "environment_adaptation": "The official image is linux/amd64-only; the local ARM64 proof reconstructs its selected Python unit-test dependencies from pinned versions.",
   "official_selected_test_file": "test/units/parsing/yaml/test_dumper.py"
 }

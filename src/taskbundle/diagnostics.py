@@ -158,8 +158,6 @@ def diagnose_command(
                 add_action("Confirm the configured base commit still contains the target bug.")
             elif phase == "baseline":
                 add_action("Repair the baseline environment or PASS_TO_PASS test selection.")
-            elif phase == "golden":
-                add_action("Inspect the gold patch and evaluator test contract together.")
             elif phase == "post_solver":
                 add_action("Review the candidate patch beside the failing post-solver test log.")
 

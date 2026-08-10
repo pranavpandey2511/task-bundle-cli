@@ -825,7 +825,7 @@ def validate_command(
     ),
     json_output: bool = typer.Option(False, "--json", help="Emit structured JSON."),
 ) -> None:
-    """Verify baseline and golden truth tables before running a solver."""
+    """Verify PASS_TO_PASS and FAIL_TO_PASS tests on the unmodified baseline."""
 
     def operation(session: CommandSession) -> dict[str, Any]:
         loaded = _load_for_lifecycle(session, bundle)
@@ -1283,7 +1283,9 @@ def doctor_command(
                 versions = docker.versions()
                 detail = f"client {versions.client}; server {versions.server}"
                 if docker.readiness.auto_started:
-                    detail += f"; started Colima profile {docker.readiness.profile} automatically"
+                    detail += f"; started {docker.readiness.provider_label} automatically"
+                    if docker.readiness.profile is not None:
+                        detail += f" (profile {docker.readiness.profile})"
                 checks.append(
                     {
                         "name": "docker-daemon",

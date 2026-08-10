@@ -135,7 +135,7 @@ def test_lifecycle_help_describes_dual_images_and_secrecy_order() -> None:
     normalized_validate = " ".join(validate_help.output.split())
     normalized_run = " ".join(run_help.output.split())
     assert "evaluator and redacted solver images" in normalized_init
-    assert "baseline and golden truth tables before running a solver" in normalized_validate
+    assert "PASS_TO_PASS and FAIL_TO_PASS tests on the unmodified baseline" in normalized_validate
     assert "sanitized solver" in normalized_run
     assert "fresh evaluators" in normalized_run
     assert "--model" in normalized_run

@@ -1,4 +1,4 @@
-"""Baseline and golden validation in isolated evaluator containers."""
+"""Baseline validation in isolated evaluator containers."""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ from taskbundle.provenance import sha256_text, write_execution_provenance
 from taskbundle.session import CommandSession
 from taskbundle.snapshots import capture_repository_snapshot, repository_snapshot_artifacts
 
-Phase = Literal["baseline", "golden", "post_solver"]
+Phase = Literal["baseline", "post_solver"]
 Suite = Literal["pass_to_pass", "fail_to_pass"]
 LifecycleErrorType = type[InvalidTaskError] | type[SolverError] | type[UnresolvedError]
 
@@ -376,23 +376,7 @@ def _prepare_evaluator(
             error_type=hidden_error,
         )
 
-    if phase == "golden":
-        docker.stream_text(
-            content=inputs.gold_patch,
-            container_id=container_id,
-            destination="/tmp/taskbundle-gold.patch",
-        )
-        _apply_patch(
-            docker=docker,
-            session=session,
-            container_id=container_id,
-            workdir=bundle.manifest.environment.workdir,
-            container_patch_path="/tmp/taskbundle-gold.patch",
-            label="gold patch",
-            artifact_name=f"{artifact_prefix}-gold",
-            trusted_path=trusted_path,
-        )
-    elif candidate_patch:
+    if candidate_patch:
         docker.stream_text(
             content=candidate_patch,
             container_id=container_id,
@@ -735,8 +719,12 @@ def validate_task(
         session.event(
             "info",
             "docker",
-            "Started the configured Colima Docker daemon automatically.",
-            {"profile": docker.readiness.profile},
+            f"Started {docker.readiness.provider_label} automatically.",
+            {
+                "provider": docker.readiness.provider,
+                "profile": docker.readiness.profile,
+                "context": docker.readiness.context,
+            },
         )
     inputs = snapshot_bundle_inputs(bundle=bundle, session=session)
     patch_contract = validate_patch_contract(
@@ -770,19 +758,18 @@ def validate_task(
     )
 
     executions: list[TestExecution] = []
-    for phase in ("baseline", "golden"):
-        executions.extend(
-            run_evaluation_phase(
-                bundle=bundle,
-                session=session,
-                docker=docker,
-                image_ref=metadata.image_id,
-                phase=phase,
-                repetitions=selected_repetitions,
-                inputs=inputs,
-                evaluator_isolation=selected_evaluator_isolation,
-            )
+    executions.extend(
+        run_evaluation_phase(
+            bundle=bundle,
+            session=session,
+            docker=docker,
+            image_ref=metadata.image_id,
+            phase="baseline",
+            repetitions=selected_repetitions,
+            inputs=inputs,
+            evaluator_isolation=selected_evaluator_isolation,
         )
+    )
     summary = summarize_executions(executions)
     result = {
         "bundle": str(bundle.root),
@@ -811,7 +798,7 @@ def validate_task(
     result["validation_artifact"] = str(validation_artifact)
     if not summary["valid"]:
         raise InvalidTaskError(
-            "Bundle validation did not match the baseline/golden truth table.",
+            "Bundle validation did not match the baseline truth table.",
             hint=f"Inspect {validation_artifact} and the per-test logs.",
             details=result,
         )

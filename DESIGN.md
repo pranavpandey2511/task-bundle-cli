@@ -49,9 +49,11 @@ These choices define what the task author must provide and what the CLI guarante
 
 6. **Keep model access on the trusted host.** The optional OpenRouter agent is driven by the CLI on the host; its API key and network traffic never enter the solver container. The `patch` and `stub` solvers provide offline alternatives that use the same grading path. This protects credentials and preserves one evaluation boundary, while live agent runs remain model-dependent and may consume external API credits.
 
-7. **Reuse one evaluator within a phase by default, with strict isolation available.** The default `phase` mode creates one evaluator container and disposable work volume per phase and repetition, then runs every selected test sequentially inside it. Baseline, golden, and post-solver always remain separate. `test-attempt` mode retains a fresh container for every individual test attempt when cross-test state is a known risk. This makes RL rollouts substantially cheaper while keeping the stronger diagnostic mode explicit.
+7. **Reuse one evaluator within a phase by default, with strict isolation available.** The default `phase` mode creates one evaluator container and disposable work volume per phase and repetition, then runs every selected test sequentially inside it. Baseline and post-solver always remain separate. `test-attempt` mode retains a fresh container for every individual test attempt when cross-test state is a known risk. This makes RL rollouts substantially cheaper while keeping the stronger diagnostic mode explicit.
 
 8. **Generate reports from recorded evidence, not a second execution service.** Lifecycle commands store events, logs, test observations, hashes, and patches in the local evidence ledger. Static HTML reports only render that recorded data; they never rerun tests or invoke a solver. Review stays simple and auditable, but reports are local evaluator artifacts and can contain private test information.
+
+9. **Start a configured local Docker provider on demand.** When the Docker CLI reports that its daemon is unavailable, the engine starts an explicitly selected Colima or Docker Desktop provider. With an unconfigured default context it discovers an installed provider, preferring lightweight Colima when both are present, and waits for Docker readiness before resuming the original command. An environment override selects Docker Desktop or disables startup. Auto-discovered providers use a command-scoped Docker context, and the CLI never invokes `docker context use`; provider startup may still create or update its own context. A non-Colima `DOCKER_HOST` remains authoritative and is never replaced by discovery.
 
 Together, these decisions keep repository-specific knowledge inside the task bundle while the CLI provides the same isolation, validation, grading, and evidence lifecycle for every task.
 
@@ -59,12 +61,11 @@ Together, these decisions keep repository-specific knowledge inside the task bun
 
 `task init` clones the exact commit, checks submodules and repository cleanliness, and builds an evaluator image from the complete source. It applies `tests/solver-view.patch` in temporary staging, removes protected files and all original Git metadata, creates a remote-free synthetic Git baseline, and builds a separate solver image. Initialization accepts those images only after verifying their immutable IDs and confirming the solver image contains no protected paths, declared test markers, foreign Git metadata, or remotes.
 
-`task validate` proves two independent truth tables:
+`task validate` proves the baseline truth table before a solver is invoked:
 
-| Phase                           | PASS_TO_PASS | FAIL_TO_PASS |
-| ------------------------------- | ------------ | ------------ |
-| Baseline with evaluator tests   | pass         | fail         |
-| Gold patch with evaluator tests | pass         | pass         |
+| Phase                         | PASS_TO_PASS | FAIL_TO_PASS |
+| ----------------------------- | ------------ | ------------ |
+| Unmodified baseline repository | pass         | fail         |
 
 Only exit code `0` is a pass. Configured assertion exits, normally `1`, are failures; timeouts and unexpected nonzero exits remain distinct errors. Validation defaults to one repetition. When repetitions are increased, every repetition starts with a fresh evaluator and all observations must agree, so a flaky test or broken runner cannot accidentally validate a task.
 
@@ -150,7 +151,7 @@ Arguments are sanitized before storage. Credentials and secret-like values are r
 
 ## Performance tradeoffs
 
-Evaluation runs sequentially and reuses the immutable evaluator image. The default path creates one container per phase/repetition, runs all selected tests there, and uses one repetition; this minimizes container churn for RL rollouts. Baseline and golden/post-solver remain separate, and solver runs still repeat the baseline before spending solver resources. Authors can opt into repeated sampling and `test-attempt` isolation for stronger flake and state-leak detection. Bounded parallel repetitions are a possible future optimization, provided evidence ordering and resource limits remain deterministic.
+Evaluation runs sequentially and reuses the immutable evaluator image. The default path creates one container per phase/repetition, runs all selected tests there, and uses one repetition; this minimizes container churn for RL rollouts. Baseline and post-solver remain separate, and solver runs still repeat the baseline before spending solver resources. Authors can opt into repeated sampling and `test-attempt` isolation for stronger flake and state-leak detection. Bounded parallel repetitions are a possible future optimization, provided evidence ordering and resource limits remain deterministic.
 
 The implementation deliberately does not include:
 

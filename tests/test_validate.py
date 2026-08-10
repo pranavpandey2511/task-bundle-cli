@@ -97,7 +97,7 @@ class ValidationRunner:
             return process_result(argv, stdout=f"{IMAGE_ID}\n")
         if argv[1] == "create":
             name = argv[argv.index("--name") + 1]
-            phase = "baseline" if "baseline" in name else "golden"
+            phase = "baseline" if "baseline" in name else "post-solver"
             container_id = f"{phase}-container"
             self.container_phases[container_id] = phase
             return process_result(argv, stdout=f"{container_id}\n")
@@ -183,7 +183,9 @@ def start_validation_session(bundle: Bundle) -> CommandSession:
     return session
 
 
-def test_validate_records_full_baseline_and_golden_matrix(valid_bundle_path: Path) -> None:
+def test_validate_records_baseline_matrix_without_applying_the_gold_patch(
+    valid_bundle_path: Path,
+) -> None:
     bundle = load_bundle(valid_bundle_path)
     write_initialized_metadata(bundle)
     runner = ValidationRunner(base_commit=bundle.manifest.repository.commit)
@@ -197,21 +199,22 @@ def test_validate_records_full_baseline_and_golden_matrix(valid_bundle_path: Pat
         session.close()
 
     assert result["valid"] is True
-    assert result["attempt_count"] == 4
+    assert result["attempt_count"] == 2
     assert result["evaluator_isolation"] == "phase"
-    assert len(rows) == 4
+    assert len(rows) == 2
     assert result["mismatches"] == []
     assert result["flaky"] == []
-    assert len([call for call in runner.calls if call[1] == "create"]) == 2
-    assert len([call for call in runner.calls if call[1] == "rm"]) == 2
-    assert len([artifact for artifact in artifacts if artifact["kind"] == "patch_log"]) == 6
+    assert len([call for call in runner.calls if call[1] == "create"]) == 1
+    assert len([call for call in runner.calls if call[1] == "rm"]) == 1
+    assert len([artifact for artifact in artifacts if artifact["kind"] == "patch_log"]) == 2
     assert (
-        len([artifact for artifact in artifacts if artifact["kind"] == "repository_snapshot"]) == 2
+        len([artifact for artifact in artifacts if artifact["kind"] == "repository_snapshot"]) == 1
     )
     assert (
         len([artifact for artifact in artifacts if artifact["kind"] == "execution_provenance"]) == 1
     )
-    assert len(result["snapshot_artifacts"]) == 2
+    assert len(result["snapshot_artifacts"]) == 1
+    assert not any("taskbundle-gold.patch" in call for call in runner.calls)
     assert all((bundle.root / ".taskbundle" / row["log_artifact"]).is_file() for row in rows)
 
 
@@ -234,11 +237,11 @@ def test_validate_test_attempt_isolation_preserves_fresh_container_per_attempt(
         session.close()
 
     assert result["valid"] is True
-    assert result["attempt_count"] == 8
+    assert result["attempt_count"] == 4
     assert result["evaluator_isolation"] == "test-attempt"
-    assert len([call for call in runner.calls if call[1] == "create"]) == 8
-    assert len([call for call in runner.calls if call[1] == "rm"]) == 8
-    assert len(result["snapshot_artifacts"]) == 8
+    assert len([call for call in runner.calls if call[1] == "create"]) == 4
+    assert len([call for call in runner.calls if call[1] == "rm"]) == 4
+    assert len(result["snapshot_artifacts"]) == 4
 
 
 def test_validate_rejects_inconsistent_repeated_outcomes(valid_bundle_path: Path) -> None:
@@ -254,10 +257,10 @@ def test_validate_rejects_inconsistent_repeated_outcomes(valid_bundle_path: Path
     finally:
         session.close()
 
-    assert len(rows) == 12
+    assert len(rows) == 6
     assert caught.value.details["valid"] is False
     assert caught.value.details["flaky"][0]["test_id"] == "add-remains-available"
-    assert len([call for call in runner.calls if call[1] == "rm"]) == 6
+    assert len([call for call in runner.calls if call[1] == "rm"]) == 3
 
 
 def test_patch_preflight_failure_still_removes_evaluator(valid_bundle_path: Path) -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import platform
 import re
 import shutil
 import time
@@ -28,6 +29,25 @@ class DockerReadiness:
     auto_started: bool = False
     provider: str | None = None
     profile: str | None = None
+    context: str | None = None
+
+    @property
+    def provider_label(self) -> str | None:
+        if self.provider is None:
+            return None
+        return {
+            "colima": "Colima",
+            "docker-desktop": "Docker Desktop",
+        }.get(self.provider)
+
+
+@dataclass(frozen=True, slots=True)
+class DockerProvider:
+    name: str
+    source: str
+    profile: str | None = None
+    context: str | None = None
+    context_override: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,20 +63,32 @@ class DockerClient:
         *,
         executable: str = "docker",
         colima_executable: str | None = None,
-        readiness_attempts: int = 12,
+        docker_desktop_launcher: str | None = None,
+        docker_desktop_available: bool | None = None,
+        readiness_attempts: int = 60,
         readiness_delay_seconds: float = 2,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self.runner = runner
         self.executable = executable
         self.colima_executable = colima_executable or shutil.which("colima")
+        self.docker_desktop_launcher = docker_desktop_launcher or shutil.which("open")
+        self.docker_desktop_available = (
+            self._detect_docker_desktop()
+            if docker_desktop_available is None
+            else docker_desktop_available
+        )
         self.readiness_attempts = readiness_attempts
         self.readiness_delay_seconds = readiness_delay_seconds
         self.sleep = sleep
         self._readiness = DockerReadiness()
+        self._context_override: str | None = None
 
     def _command(self, *arguments: str) -> list[str]:
-        return [self.executable, *arguments]
+        command = [self.executable]
+        if self._context_override is not None:
+            command.extend(["--context", self._context_override])
+        return [*command, *arguments]
 
     @property
     def readiness(self) -> DockerReadiness:
@@ -64,34 +96,39 @@ class DockerClient:
 
     def versions(self) -> DockerVersions:
         result = self._version_result()
-        if not result.succeeded and self._is_daemon_unavailable(result):
-            colima = self._selected_colima_profile()
-            if colima is not None and self._auto_start_colima_enabled():
-                profile, context = colima
+        if (
+            not result.succeeded
+            and self._is_daemon_unavailable(result)
+            and self._auto_start_docker_enabled()
+        ):
+            provider = self._selected_docker_provider()
+            if provider is not None and self._provider_auto_start_enabled(provider):
                 original_error = result
-                self._start_colima(
-                    profile=profile,
-                    context=context,
-                    original_error=original_error,
-                )
+                self._context_override = provider.context_override
+                self._start_provider(provider=provider, original_error=original_error)
                 result = self._wait_for_daemon()
                 if result.succeeded:
                     self._readiness = DockerReadiness(
                         auto_started=True,
-                        provider="colima",
-                        profile=profile,
+                        provider=provider.name,
+                        profile=provider.profile,
+                        context=provider.context,
                     )
                 else:
+                    provider_label = self._provider_label(provider)
                     raise InfrastructureError(
-                        "Colima started, but its Docker socket did not become available.",
+                        f"{provider_label} started, but its Docker daemon did not become "
+                        "available.",
                         hint=(
-                            f"Run `docker version`. If it still cannot connect and interrupting "
-                            "existing containers is safe, run "
-                            f"`colima restart {profile}` before retrying."
+                            "Run `docker version` to inspect the active daemon, then restart "
+                            f"{provider_label} before retrying if interrupting existing "
+                            "containers is safe."
                         ),
                         details={
-                            "docker_context": context,
-                            "colima_profile": profile,
+                            "docker_provider": provider.name,
+                            "docker_context": provider.context,
+                            "provider_source": provider.source,
+                            "colima_profile": provider.profile,
                             "original_docker_error": self._result_details(original_error),
                             "retry_docker_error": self._result_details(result),
                         },
@@ -116,7 +153,7 @@ class DockerClient:
         )
 
     def _wait_for_daemon(self) -> ProcessResult:
-        """Allow Colima's host socket forwarder a bounded interval to come up."""
+        """Allow the selected provider a bounded interval to expose its Docker daemon."""
 
         attempts = max(1, self.readiness_attempts)
         result = self._version_result()
@@ -133,31 +170,126 @@ class DockerClient:
         indicators = (
             "cannot connect to the docker daemon",
             "is the docker daemon running",
+            "failed to connect to the docker api",
+            "daemon is running",
             "connection refused",
             "error during connect",
         )
         return any(indicator in combined for indicator in indicators)
 
     @staticmethod
-    def _auto_start_colima_enabled() -> bool:
+    def _auto_start_docker_enabled() -> bool:
+        value = os.environ.get("TASKBUNDLE_AUTO_START_DOCKER", "1").strip().lower()
+        return value not in {"0", "false", "no", "off"}
+
+    @staticmethod
+    def _provider_auto_start_enabled(provider: DockerProvider) -> bool:
+        if provider.name != "colima":
+            return True
         value = os.environ.get("TASKBUNDLE_AUTO_START_COLIMA", "1").strip().lower()
         return value not in {"0", "false", "no", "off"}
 
-    def _selected_colima_profile(self) -> tuple[str, str] | None:
+    def _selected_docker_provider(self) -> DockerProvider | None:
         host = os.environ.get("DOCKER_HOST", "")
         match = re.search(r"\.colima/([^/]+)/docker\.sock(?:$|[?#])", host)
         if match is not None:
-            return match.group(1), "DOCKER_HOST"
+            return DockerProvider(
+                name="colima",
+                source="DOCKER_HOST",
+                profile=match.group(1),
+            )
+        if host:
+            return None
+
+        preference = os.environ.get("TASKBUNDLE_DOCKER_PROVIDER", "auto").strip().lower()
+        preference = preference.replace("_", "-")
+        if preference not in {"auto", "colima", "docker-desktop"}:
+            raise InfrastructureError(
+                "TASKBUNDLE_DOCKER_PROVIDER has an unsupported value.",
+                hint="Use `auto`, `colima`, or `docker-desktop`.",
+                details={"docker_provider": preference},
+            )
+        if preference == "colima":
+            return self._colima_provider(source="TASKBUNDLE_DOCKER_PROVIDER")
+        if preference == "docker-desktop":
+            return DockerProvider(
+                name="docker-desktop",
+                source="TASKBUNDLE_DOCKER_PROVIDER",
+                context="desktop-linux",
+                context_override="desktop-linux",
+            )
 
         context = self.runner.run(self._command("context", "show"), timeout_seconds=10)
         if not context.succeeded:
             return None
         selected = context.stdout.strip()
         if selected == "colima":
-            return "default", selected
+            return DockerProvider(
+                name="colima",
+                source="docker context",
+                profile="default",
+                context=selected,
+                context_override=selected,
+            )
         if selected.startswith("colima-") and len(selected) > len("colima-"):
-            return selected[len("colima-") :], selected
+            return DockerProvider(
+                name="colima",
+                source="docker context",
+                profile=selected[len("colima-") :],
+                context=selected,
+                context_override=selected,
+            )
+        if selected == "desktop-linux":
+            return DockerProvider(
+                name="docker-desktop",
+                source="docker context",
+                context=selected,
+                context_override=selected,
+            )
+        if selected not in {"", "default"}:
+            return None
+        if self.colima_executable is not None:
+            return self._colima_provider(source="provider discovery")
+        if self.docker_desktop_available:
+            return DockerProvider(
+                name="docker-desktop",
+                source="provider discovery",
+                context="desktop-linux",
+                context_override="desktop-linux",
+            )
         return None
+
+    @staticmethod
+    def _colima_provider(*, source: str) -> DockerProvider:
+        return DockerProvider(
+            name="colima",
+            source=source,
+            profile="default",
+            context="colima",
+            context_override="colima",
+        )
+
+    def _start_provider(
+        self,
+        *,
+        provider: DockerProvider,
+        original_error: ProcessResult,
+    ) -> None:
+        if provider.name == "colima":
+            assert provider.profile is not None
+            self._start_colima(
+                profile=provider.profile,
+                context=provider.source,
+                original_error=original_error,
+            )
+            return
+        self._start_docker_desktop(provider=provider, original_error=original_error)
+
+    @staticmethod
+    def _provider_label(provider: DockerProvider) -> str:
+        if provider.name == "docker-desktop":
+            return "Docker Desktop"
+        return "Colima"
 
     def _start_colima(
         self,
@@ -198,6 +330,50 @@ class DockerClient:
                     "colima_start": self._result_details(started),
                 },
             )
+
+    def _start_docker_desktop(
+        self,
+        *,
+        provider: DockerProvider,
+        original_error: ProcessResult,
+    ) -> None:
+        if not self.docker_desktop_available or self.docker_desktop_launcher is None:
+            raise InfrastructureError(
+                "The selected Docker context requires Docker Desktop, but it is not installed.",
+                hint="Install Docker Desktop, select Colima, or start a compatible Docker daemon.",
+                details={
+                    "docker_context": provider.context,
+                    "provider_source": provider.source,
+                    "docker_error": self._result_details(original_error),
+                },
+            )
+        started = self.runner.run(
+            [self.docker_desktop_launcher, "-a", "Docker"],
+            timeout_seconds=30,
+        )
+        if not started.succeeded:
+            raise InfrastructureError(
+                "Could not start Docker Desktop.",
+                hint="Open Docker Desktop directly to view its diagnostics, then retry.",
+                details={
+                    "docker_context": provider.context,
+                    "provider_source": provider.source,
+                    "docker_error": self._result_details(original_error),
+                    "docker_desktop_start": self._result_details(started),
+                },
+            )
+
+    @staticmethod
+    def _detect_docker_desktop() -> bool:
+        if platform.system() != "Darwin":
+            return False
+        return any(
+            path.exists()
+            for path in (
+                Path("/Applications/Docker.app"),
+                Path.home() / "Applications" / "Docker.app",
+            )
+        )
 
     @staticmethod
     def _result_details(result: ProcessResult) -> dict[str, object]:

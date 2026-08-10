@@ -129,7 +129,7 @@ def _outcome(report: CommandReport) -> tuple[str, str, str]:
         ),
         "check": ("Contract passed", "The task bundle passed its static author checks."),
         "init": ("Environment ready", "Evaluator and solver environments were prepared."),
-        "validate": ("Task validated", "The baseline and golden expectations were confirmed."),
+        "validate": ("Task validated", "The baseline expectations were confirmed."),
     }
     label, detail = labels.get(report.command, ("Succeeded", "The command completed successfully."))
     return label, "success", detail

@@ -393,8 +393,12 @@ def initialize_task(
         session.event(
             "info",
             "docker",
-            "Started the configured Colima Docker daemon automatically.",
-            {"profile": docker.readiness.profile},
+            f"Started {docker.readiness.provider_label} automatically.",
+            {
+                "provider": docker.readiness.provider,
+                "profile": docker.readiness.profile,
+                "context": docker.readiness.context,
+            },
         )
     metadata = None if force_rebuild else _read_metadata(cached_path)
     reused = False

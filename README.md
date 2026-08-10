@@ -1,6 +1,6 @@
 # Task Bundle CLI
 
-Task Bundle CLI builds and grades coding-task bundles locally. It pins a repository revision, verifies the task against a reference patch, gives a solver a redacted source tree, then grades only the solver's captured patch in a fresh evaluator.
+Task Bundle CLI builds and grades coding-task bundles locally. It pins a repository revision, validates the unmodified baseline, gives a solver a redacted source tree, then grades only the solver's captured patch in a fresh evaluator.
 
 It is designed for reviewable, repeatable local evaluation—not for executing untrusted workloads in a shared production environment.
 
@@ -21,24 +21,31 @@ It is designed for reviewable, repeatable local evaluation—not for executing u
 - Python 3.12+
 - [uv](https://docs.astral.sh/uv/)
 - Git
-- Docker CLI plus a running compatible daemon (Docker Desktop, Colima, or Docker Engine)
+- Docker CLI plus a compatible local provider (Docker Desktop, Colima, or Docker Engine)
 
 ```bash
 uv sync --frozen
 uv run task doctor .
 ```
 
-On macOS, a lightweight Colima setup is:
+Docker-backed commands automatically start a stopped Colima or Docker Desktop installation and
+wait for its daemon. An explicitly configured `DOCKER_HOST` or Docker context wins. When the
+default context is unconfigured and both providers are installed, the CLI prefers Colima; set
+`TASKBUNDLE_DOCKER_PROVIDER=docker-desktop` to prefer Docker Desktop, or
+`TASKBUNDLE_AUTO_START_DOCKER=0` to require manual startup. Provider discovery is command-scoped
+and the CLI never runs `docker context use`; Colima or Docker Desktop may still create or update
+their own context while starting.
+
+On macOS, a lightweight Colima installation is:
 
 ```bash
 brew install colima docker
-colima start
 ```
 
-Then confirm Docker is usable:
+Then confirm provider startup and Docker access:
 
 ```bash
-docker run --rm hello-world
+uv run task doctor .
 ```
 
 ### Run the included bundle
@@ -66,7 +73,7 @@ The second included bundle follows the same commands; substitute `examples/swe-b
 | `task new` | Creates an editable, profile-aware task draft. | No |
 | `task validate --static` | Checks the manifest, patches, paths, and authoring contract. | No |
 | `task init` | Materializes the pinned repository and builds evaluator and redacted solver images. | Yes |
-| `task validate` | Proves the baseline and reference-patch expectations. | Yes |
+| `task validate` | Runs PASS_TO_PASS and FAIL_TO_PASS tests on the unmodified baseline. | Yes |
 | `task run` | Invokes a solver, captures its patch, applies policy, and grades it. | Yes |
 | `task report` | Verifies evidence, shows the result, and optionally exports it. | No |
 | `task doctor` | Checks Python, Git, Docker CLI, and daemon availability. | No |
@@ -95,7 +102,7 @@ The host—not the solver container—contacts OpenRouter. Model requests can in
 
 ```text
 task init      pinned source ──► evaluator image + redacted solver image
-task validate  baseline: expected failures ──► gold patch: expected passes
+task validate  unmodified baseline: PASS_TO_PASS passes; FAIL_TO_PASS fails
 task run       solver patch ──► fresh evaluator ──► resolved or unresolved
 ```
 
@@ -120,6 +127,14 @@ Each lifecycle command records evidence in the bundle's ignored `.taskbundle/` d
 ```
 
 Use `task report --bundle BUNDLE --events` for the factual timeline, or add `--export PATH` to create a verified evidence ZIP. Reports can contain evaluator material, logs, and candidate diffs; keep them reviewer-side.
+
+The generated local report includes a resolved-run overview, the recorded problem statement,
+diagnosis and test observations, and an artifact inventory.
+
+![Resolved-run overview](docs/report-screenshots/resolved-run-overview.png)
+![Problem statement](docs/report-screenshots/problem-statement.png)
+![Diagnosis and tests](docs/report-screenshots/diagnosis-and-tests.png)
+![Artifact inventory](docs/report-screenshots/artifact-inventory.png)
 
 ## Author a bundle
 
@@ -151,7 +166,7 @@ Important authoring rules:
 - Limit candidate changes with `candidate.allowed_patch_paths`; explicitly deny protected subpaths when needed.
 - Keep solver networking disabled.
 
-`task validate --static` checks the authoring contract; `init` and full `validate` prove the repository, image, and test behavior. The generated profiles cover Python, Node, Go, Rust, and custom repositories, but the bundle author owns the runtime commands and Dockerfile.
+`task validate --static` checks the authoring contract; `init` builds the images; and full `validate` proves the baseline repository and test behavior before a solver runs. The generated profiles cover Python, Node, Go, Rust, and custom repositories, but the bundle author owns the runtime commands and Dockerfile.
 
 ## Results and exits
 
@@ -178,7 +193,7 @@ uv build --offline
 TASKBUNDLE_RUN_DOCKER_TESTS=1 uv run pytest -q -m docker
 ```
 
-The project was last validated in this checkout on 2026-08-10: 135 regular tests passed (one Docker test skipped), real Docker integration passed with both isolation modes, both included bundles completed their positive-control patch runs, and the offline wheel and source-distribution build succeeded.
+The project was last validated in this checkout on 2026-08-10: 139 regular tests passed (one real-Docker test skipped), Ruff and strict mypy passed, and both included bundles passed baseline-only validation before their reference-patch positive-control runs resolved.
 
 ## Further reading
 

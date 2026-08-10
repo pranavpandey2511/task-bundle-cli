@@ -54,7 +54,7 @@ def test_checked_in_evaluation_summarizes_a_resolved_run() -> None:
     assert evaluation["task_id"] == "swebench-pro-ansible-12734fa2"
     assert evaluation["dataset_instance_id"] == provenance_instance_id()
     assert evaluation["resolved"] is True
-    assert evaluation["source_run"]["command_id"] == "20260810T150302696585Z-f6616b39"
+    assert evaluation["source_run"]["command_id"] == "20260810T164458035453Z-841b8f79"
     assert evaluation["source_run"]["cli_version"] == "0.3.0"
     assert evaluation["source_run"]["repetitions"] == 1
     assert evaluation["source_run"]["evaluator_isolation"] == "phase"

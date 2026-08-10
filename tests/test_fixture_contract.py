@@ -15,7 +15,7 @@ def clone(source: Path, destination: Path) -> Path:
     return destination
 
 
-def test_fixture_expresses_baseline_and_golden_truth_tables(
+def test_fixture_expresses_the_baseline_truth_table_and_reference_patch(
     tmp_path: Path,
     fixture_assets: Path,
     minimal_repository: tuple[Path, str],

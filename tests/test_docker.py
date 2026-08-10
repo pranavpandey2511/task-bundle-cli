@@ -141,23 +141,162 @@ def test_versions_waits_for_colima_docker_socket(
     assert delays == [0.25]
 
 
-def test_versions_does_not_start_an_unrelated_docker_provider(
+def test_versions_discovers_colima_for_default_context_and_docker_29_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("DOCKER_HOST", raising=False)
+    monkeypatch.delenv("TASKBUNDLE_DOCKER_PROVIDER", raising=False)
     runner = SequenceRunner(
         [
-            result([], exit_code=1, stderr="Cannot connect to the Docker daemon\n"),
-            result([], stdout="desktop-linux\n"),
+            result(
+                [],
+                exit_code=1,
+                stderr=(
+                    "failed to connect to the docker API at unix:///var/run/docker.sock; "
+                    "check if the path is correct and if the daemon is running\n"
+                ),
+            ),
+            result([], stdout="default\n"),
+            result([], stdout="starting Colima\n"),
+            result([], stdout="29.6.2|29.6.2\n"),
+            result([], stdout="sha256:image\n"),
         ]
     )
+    docker = DockerClient(
+        runner,
+        colima_executable="colima",
+        docker_desktop_available=True,
+    )
 
-    with pytest.raises(InfrastructureError, match="Could not query Docker"):
-        DockerClient(runner, colima_executable="colima").versions()
+    assert docker.versions().server == "29.6.2"
+    assert docker.inspect_image("example") == "sha256:image"
 
     assert runner.calls == [
         ("docker", "version", "--format", "{{.Client.Version}}|{{.Server.Version}}"),
         ("docker", "context", "show"),
+        ("colima", "start", "default"),
+        (
+            "docker",
+            "--context",
+            "colima",
+            "version",
+            "--format",
+            "{{.Client.Version}}|{{.Server.Version}}",
+        ),
+        (
+            "docker",
+            "--context",
+            "colima",
+            "image",
+            "inspect",
+            "--format",
+            "{{.Id}}",
+            "example",
+        ),
+    ]
+    assert docker.readiness.provider == "colima"
+    assert docker.readiness.profile == "default"
+    assert docker.readiness.context == "colima"
+
+
+def test_versions_starts_selected_docker_desktop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("DOCKER_HOST", raising=False)
+    monkeypatch.delenv("TASKBUNDLE_DOCKER_PROVIDER", raising=False)
+    runner = SequenceRunner(
+        [
+            result([], exit_code=1, stderr="Cannot connect to the Docker daemon\n"),
+            result([], stdout="desktop-linux\n"),
+            result([]),
+            result([], stdout="29.6.2|29.6.2\n"),
+        ]
+    )
+    docker = DockerClient(
+        runner,
+        colima_executable="colima",
+        docker_desktop_launcher="open",
+        docker_desktop_available=True,
+    )
+
+    assert docker.versions().client == "29.6.2"
+    assert runner.calls == [
+        ("docker", "version", "--format", "{{.Client.Version}}|{{.Server.Version}}"),
+        ("docker", "context", "show"),
+        ("open", "-a", "Docker"),
+        (
+            "docker",
+            "--context",
+            "desktop-linux",
+            "version",
+            "--format",
+            "{{.Client.Version}}|{{.Server.Version}}",
+        ),
+    ]
+    assert docker.readiness.provider == "docker-desktop"
+    assert docker.readiness.provider_label == "Docker Desktop"
+
+
+def test_versions_respects_docker_desktop_provider_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("DOCKER_HOST", raising=False)
+    monkeypatch.setenv("TASKBUNDLE_DOCKER_PROVIDER", "docker-desktop")
+    runner = SequenceRunner(
+        [
+            result([], exit_code=1, stderr="Cannot connect to the Docker daemon\n"),
+            result([]),
+            result([], stdout="29.6.2|29.6.2\n"),
+        ]
+    )
+    docker = DockerClient(
+        runner,
+        colima_executable="colima",
+        docker_desktop_launcher="open",
+        docker_desktop_available=True,
+    )
+
+    assert docker.versions().server == "29.6.2"
+    assert runner.calls[1] == ("open", "-a", "Docker")
+    assert ("docker", "context", "show") not in runner.calls
+
+
+def test_versions_does_not_discover_provider_for_custom_docker_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DOCKER_HOST", "tcp://docker.example:2376")
+    runner = SequenceRunner(
+        [result([], exit_code=1, stderr="Cannot connect to the Docker daemon\n")]
+    )
+
+    with pytest.raises(InfrastructureError, match="Could not query Docker"):
+        DockerClient(
+            runner,
+            colima_executable="colima",
+            docker_desktop_available=True,
+        ).versions()
+
+    assert runner.calls == [
+        ("docker", "version", "--format", "{{.Client.Version}}|{{.Server.Version}}"),
+    ]
+
+
+def test_versions_respects_auto_start_opt_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("DOCKER_HOST", raising=False)
+    monkeypatch.setenv("TASKBUNDLE_AUTO_START_DOCKER", "0")
+    runner = SequenceRunner(
+        [result([], exit_code=1, stderr="Cannot connect to the Docker daemon\n")]
+    )
+
+    with pytest.raises(InfrastructureError, match="Could not query Docker"):
+        DockerClient(
+            runner,
+            colima_executable="colima",
+            docker_desktop_available=True,
+        ).versions()
+
+    assert runner.calls == [
+        ("docker", "version", "--format", "{{.Client.Version}}|{{.Server.Version}}"),
     ]
 
 
