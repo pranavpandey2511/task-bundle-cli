@@ -1,0 +1,18 @@
+{
+  "dataset": "ScaleAI/SWE-bench_Pro",
+  "dataset_revision": "7ab5114912baf22bb098818e604c02fe7ad2c11f",
+  "harness": "scaleapi/SWE-bench_Pro-os",
+  "harness_revision": "ca10a60a5fcae51e6948ffe1485d4153d421e6c5",
+  "instance_id": "instance_ansible__ansible-d9f1866249756efc264b00ff7497e92c11a9885f-v0f01c69f1e2528b935359cfe578530722bca2c59",
+  "dockerhub_tag": "ansible.ansible-ansible__ansible-d9f1866249756efc264b00ff7497e92c11a9885f-v0f01c69f1e2528b935359cfe578530722bca2c59",
+  "docker_manifest_digest": "sha256:f9e1f9d428d55a8f26b27d89f29819b79a82b847fd252903c68221b2812ccd04",
+  "local_base_image": "python:3.11-slim@sha256:90744cff8f32887f075c47d747a173ff333e9e98801667af93c357fa9f5e28ff",
+  "bundle_schema_version": 3,
+  "cli_version": "0.2.0",
+  "solver_view_sha256": "88fb511150e3117bd617eb577bd407c14f7fdbf549c263d489f4ea0693fa718e",
+  "initialized_command_id": "20260810T085105581441Z-ff7e8241",
+  "validated_command_id": "20260810T085140519437Z-6dca8dbe",
+  "resolved_run_command_id": "20260810T085210444210Z-66d8c465",
+  "environment_adaptation": "The official image is linux/amd64-only; the local ARM64 proof reconstructs its selected Python 3.11 unit-test dependencies from pinned versions.",
+  "official_selected_test_file": "test/units/module_utils/common/validation/test_check_type_dict.py"
+}

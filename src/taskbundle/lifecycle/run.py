@@ -42,6 +42,7 @@ def _solver_for(
     max_patch_bytes: int,
     description: str,
     allowed_paths: list[str],
+    disallowed_paths: list[str],
     agent_model: str | None,
     agent_api_key_env: str,
     agent_env_file: Path,
@@ -81,6 +82,7 @@ def _solver_for(
                 settings=settings,
                 description=description,
                 allowed_paths=allowed_paths,
+                disallowed_paths=disallowed_paths,
             ),
             None,
             None,
@@ -305,6 +307,7 @@ def run_task(
             max_patch_bytes=bundle.manifest.runtime.max_patch_bytes,
             description=inputs.description,
             allowed_paths=bundle.manifest.candidate.allowed_patch_paths,
+            disallowed_paths=bundle.manifest.candidate.disallowed_patch_paths,
             agent_model=agent_model,
             agent_api_key_env=agent_api_key_env,
             agent_env_file=agent_env_file,
@@ -552,14 +555,26 @@ def run_task(
             details={**partial, "protected_overlap": sorted(protected_overlap)},
         )
 
-    outside_allowed = {path for path in patch_paths if not bundle.manifest.candidate.allows(path)}
-    if outside_allowed:
+    outside_allowed = {
+        path for path in patch_paths if not bundle.manifest.candidate.is_within_allowed(path)
+    }
+    disallowed_paths = {
+        path for path in patch_paths if bundle.manifest.candidate.is_disallowed(path)
+    }
+    if outside_allowed or disallowed_paths:
         partial["snapshot_artifacts"] = repository_snapshot_artifacts(session)
         report_path = _write_run_report(session, partial)
         raise SolverError(
             "The solver attempted to modify paths outside the task's candidate-edit policy.",
-            hint=f"Inspect {report_path}; only task-authorized implementation paths may change.",
-            details={**partial, "outside_allowed_paths": sorted(outside_allowed)},
+            hint=(
+                f"Inspect {report_path}; only allowed, non-disallowed implementation paths "
+                "may change."
+            ),
+            details={
+                **partial,
+                "outside_allowed_paths": sorted(outside_allowed),
+                "disallowed_paths": sorted(disallowed_paths),
+            },
         )
 
     if outcome.process.exit_code != 0 and not patch_content:

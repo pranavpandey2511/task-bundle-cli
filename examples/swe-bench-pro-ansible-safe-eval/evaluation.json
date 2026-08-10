@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "task_id": "swebench-pro-ansible-d9f18662",
+  "dataset_instance_id": "instance_ansible__ansible-d9f1866249756efc264b00ff7497e92c11a9885f-v0f01c69f1e2528b935359cfe578530722bca2c59",
+  "resolved": true,
+  "source_run": {
+    "command_id": "20260810T085210444210Z-66d8c465",
+    "cli_version": "0.2.0",
+    "solver": "patch",
+    "repetitions": 3,
+    "execution_fingerprint": "4e6e44eb21cd979b83855650e299c87828a3850b28d6dce544b2cacc0d7a1051",
+    "image_id": "sha256:bcf26d5d6c2764f0499df0fcfbabf15067b17b00e7011522c62e64a6cf36cec1",
+    "solver_image_id": "sha256:40f736e8caf3a106b932a6f31f917e0b689660b3f436092c66be9e5f443ef555",
+    "solver_base_commit": "b636ac95d454f9477d688bf5f3bdbd66caf773e0",
+    "solver_view_sha256": "88fb511150e3117bd617eb577bd407c14f7fdbf549c263d489f4ea0693fa718e",
+    "candidate_input_sha256": "085236f733a15425970deb71e82f48a39d8c959fd2bd47ea79adc5b1c16a8374",
+    "patch_sha256": "f565e33798cbbf6159a25680a8b0392d6e467af2c03d5363d22104bc2fc2b1e7"
+  },
+  "phases": {
+    "baseline": [
+      {
+        "suite": "pass_to_pass",
+        "test_id": "check-type-dict-valid",
+        "expected": "pass",
+        "observed": "pass",
+        "matched": true
+      },
+      {
+        "suite": "fail_to_pass",
+        "test_id": "check-type-dict-invalid",
+        "expected": "fail",
+        "observed": "fail",
+        "matched": true
+      }
+    ],
+    "post_solver": [
+      {
+        "suite": "pass_to_pass",
+        "test_id": "check-type-dict-valid",
+        "expected": "pass",
+        "observed": "pass",
+        "matched": true
+      },
+      {
+        "suite": "fail_to_pass",
+        "test_id": "check-type-dict-invalid",
+        "expected": "pass",
+        "observed": "pass",
+        "matched": true
+      }
+    ]
+  },
+  "summary": {
+    "baseline": {
+      "matched": 2,
+      "total": 2
+    },
+    "post_solver": {
+      "passed": 2,
+      "total": 2
+    }
+  }
+}

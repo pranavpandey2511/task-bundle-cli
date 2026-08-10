@@ -31,6 +31,15 @@ def _validate_bundle_relative_path(value: str) -> str:
     return value
 
 
+def _validate_candidate_policy_path(value: str) -> str:
+    normalized = _validate_bundle_relative_path(value)
+    if PurePosixPath(normalized) == PurePosixPath("."):
+        raise ValueError("must not authorize the repository root")
+    if any(character in normalized for character in "*?["):
+        raise ValueError("must be a literal path prefix, not a glob")
+    return normalized
+
+
 class RepositorySpec(StrictModel):
     url: str = Field(min_length=1)
     commit: str = Field(pattern=r"^[0-9a-fA-F]{40}$")
@@ -218,21 +227,48 @@ class RuntimeSpec(StrictModel):
 
 class CandidateSpec(StrictModel):
     allowed_patch_paths: list[str] = Field(min_length=1)
+    disallowed_patch_paths: list[str] = Field(default_factory=list)
 
-    @field_validator("allowed_patch_paths")
+    @field_validator("allowed_patch_paths", "disallowed_patch_paths")
     @classmethod
-    def allowed_paths_are_safe_and_unique(cls, value: list[str]) -> list[str]:
-        normalized = [_validate_bundle_relative_path(path) for path in value]
+    def candidate_policy_paths_are_safe_and_unique(cls, value: list[str]) -> list[str]:
+        normalized = [_validate_candidate_policy_path(path) for path in value]
         if len(set(normalized)) != len(normalized):
             raise ValueError("must not contain duplicate paths")
         return normalized
 
-    def allows(self, candidate_path: str) -> bool:
+    @model_validator(mode="after")
+    def disallowed_paths_are_within_allowed_paths(self) -> Self:
+        outside = [
+            path
+            for path in self.disallowed_patch_paths
+            if not self.is_within_allowed(path)
+        ]
+        if outside:
+            raise ValueError(
+                "disallowed_patch_paths must be beneath an allowed_patch_paths root: "
+                + ", ".join(outside)
+            )
+        return self
+
+    @staticmethod
+    def _matches_root(candidate_path: str, root: str) -> bool:
         path = PurePosixPath(candidate_path)
+        policy_root = PurePosixPath(root)
+        return path == policy_root or policy_root in path.parents
+
+    def is_within_allowed(self, candidate_path: str) -> bool:
         return any(
-            path == PurePosixPath(root) or PurePosixPath(root) in path.parents
-            for root in self.allowed_patch_paths
+            self._matches_root(candidate_path, root) for root in self.allowed_patch_paths
         )
+
+    def is_disallowed(self, candidate_path: str) -> bool:
+        return any(
+            self._matches_root(candidate_path, root) for root in self.disallowed_patch_paths
+        )
+
+    def allows(self, candidate_path: str) -> bool:
+        return self.is_within_allowed(candidate_path) and not self.is_disallowed(candidate_path)
 
 
 class TaskManifest(StrictModel):

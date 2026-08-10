@@ -83,6 +83,42 @@ def test_candidate_patch_paths_are_safe_and_disjoint_from_evaluator_files(
         TaskManifest.model_validate(payload)
 
 
+def test_candidate_disallowed_paths_carve_out_allowed_subtrees(valid_bundle_path: Path) -> None:
+    payload = json.loads((valid_bundle_path / "task.json").read_text(encoding="utf-8"))
+    payload["candidate"] = {
+        "allowed_patch_paths": ["src"],
+        "disallowed_patch_paths": ["src/generated", "src/vendor.py"],
+    }
+
+    manifest = TaskManifest.model_validate(payload)
+
+    assert manifest.candidate.allows("src/main.py")
+    assert not manifest.candidate.allows("src/generated/schema.py")
+    assert not manifest.candidate.allows("src/vendor.py")
+    assert not manifest.candidate.allows("tests/test_main.py")
+
+
+@pytest.mark.parametrize("path", [".", "src/*", "src/?.py", "src/[a-z].py"])
+def test_candidate_policy_paths_must_be_literal_non_root_prefixes(
+    valid_bundle_path: Path, path: str
+) -> None:
+    payload = json.loads((valid_bundle_path / "task.json").read_text(encoding="utf-8"))
+    payload["candidate"]["allowed_patch_paths"] = [path]
+
+    with pytest.raises(ValidationError, match=r"repository root|literal path prefix"):
+        TaskManifest.model_validate(payload)
+
+
+def test_candidate_disallowed_paths_must_be_beneath_an_allowed_root(
+    valid_bundle_path: Path,
+) -> None:
+    payload = json.loads((valid_bundle_path / "task.json").read_text(encoding="utf-8"))
+    payload["candidate"]["disallowed_patch_paths"] = ["other/private.py"]
+
+    with pytest.raises(ValidationError, match="beneath an allowed_patch_paths root"):
+        TaskManifest.model_validate(payload)
+
+
 def test_evaluator_path_cannot_include_the_writable_repository(valid_bundle_path: Path) -> None:
     payload = json.loads((valid_bundle_path / "task.json").read_text(encoding="utf-8"))
     payload["environment"]["evaluator_path"] = ["/workspace/bin", "/usr/bin"]

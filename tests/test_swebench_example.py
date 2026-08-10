@@ -8,6 +8,7 @@ from taskbundle.lifecycle.initialize import sha256_file
 
 PROJECT_ROOT = Path(__file__).parents[1]
 EXAMPLE = PROJECT_ROOT / "examples" / "swe-bench-pro-ansible"
+SAFE_EVAL_EXAMPLE = PROJECT_ROOT / "examples" / "swe-bench-pro-ansible-safe-eval"
 
 
 def test_checked_in_swebench_pro_bundle_has_immutable_provenance() -> None:
@@ -35,6 +36,7 @@ def test_checked_in_swebench_pro_bundle_has_immutable_provenance() -> None:
         "lib/ansible/parsing/yaml/dumper.py",
         "lib/ansible/plugins/filter/core.py",
     }
+    assert bundle.manifest.candidate.disallowed_patch_paths == []
     selected_tests = bundle.manifest.tests.pass_to_pass + bundle.manifest.tests.fail_to_pass
     assert all("/usr/local/bin/python -I -m pytest" in test.command for test in selected_tests)
     assert {test.path for test in bundle.manifest.tests.pass_to_pass} == {
@@ -74,6 +76,62 @@ def test_checked_in_evaluation_summarizes_a_resolved_run() -> None:
     assert target_baseline["expected"] == target_baseline["observed"] == "fail"
     assert len(post_solver) == 5
     assert all(result["matched"] and result["observed"] == "pass" for result in post_solver)
+
+
+def test_safe_eval_swebench_pro_bundle_has_immutable_provenance() -> None:
+    bundle = load_bundle(SAFE_EVAL_EXAMPLE)
+    provenance = json.loads((SAFE_EVAL_EXAMPLE / "dataset.json").read_text(encoding="utf-8"))
+
+    assert bundle.manifest.repository.url == "https://github.com/ansible/ansible.git"
+    assert bundle.manifest.repository.commit == "59ca05b70994b07a9507f61a0871146a4991b262"
+    assert provenance["instance_id"] == (
+        "instance_ansible__ansible-d9f1866249756efc264b00ff7497e92c11a9885f-"
+        "v0f01c69f1e2528b935359cfe578530722bca2c59"
+    )
+    assert provenance["dataset_revision"] == "7ab5114912baf22bb098818e604c02fe7ad2c11f"
+    assert provenance["harness_revision"] == "ca10a60a5fcae51e6948ffe1485d4153d421e6c5"
+    assert sha256_file(bundle.gold_patch_path) == (
+        "085236f733a15425970deb71e82f48a39d8c959fd2bd47ea79adc5b1c16a8374"
+    )
+    assert sha256_file(bundle.test_patch_path) == (
+        "ef22b72858cfa7b69f0c860fbf87fe296e7d7b1516d6c30a59e3b328e345a832"
+    )
+    assert sha256_file(bundle.solver_view_patch_path) == (
+        "88fb511150e3117bd617eb577bd407c14f7fdbf549c263d489f4ea0693fa718e"
+    )
+    assert len(bundle.manifest.tests.pass_to_pass) == 1
+    assert len(bundle.manifest.tests.fail_to_pass) == 1
+    assert bundle.manifest.runtime.memory == "2g"
+    assert set(bundle.manifest.candidate.allowed_patch_paths) == {
+        "changelogs/fragments/deprecate-safe-evals.yml",
+        "lib/ansible/module_utils/basic.py",
+        "lib/ansible/module_utils/common/validation.py",
+    }
+    assert bundle.manifest.candidate.disallowed_patch_paths == []
+    assert "deleted file mode 100644" in bundle.solver_view_patch_path.read_text(encoding="utf-8")
+
+
+def test_safe_eval_checked_in_evaluation_summarizes_a_resolved_run() -> None:
+    evaluation = json.loads((SAFE_EVAL_EXAMPLE / "evaluation.json").read_text(encoding="utf-8"))
+    provenance = json.loads((SAFE_EVAL_EXAMPLE / "dataset.json").read_text(encoding="utf-8"))
+
+    assert evaluation["schema_version"] == 1
+    assert evaluation["task_id"] == "swebench-pro-ansible-d9f18662"
+    assert evaluation["dataset_instance_id"] == provenance["instance_id"]
+    assert evaluation["resolved"] is True
+    assert evaluation["source_run"]["command_id"] == provenance["resolved_run_command_id"]
+    assert evaluation["source_run"]["candidate_input_sha256"] == sha256_file(
+        SAFE_EVAL_EXAMPLE / "gold.patch"
+    )
+    assert evaluation["summary"] == {
+        "baseline": {"matched": 2, "total": 2},
+        "post_solver": {"passed": 2, "total": 2},
+    }
+    assert all(result["matched"] for result in evaluation["phases"]["baseline"])
+    assert all(
+        result["matched"] and result["observed"] == "pass"
+        for result in evaluation["phases"]["post_solver"]
+    )
 
 
 def provenance_instance_id() -> str:

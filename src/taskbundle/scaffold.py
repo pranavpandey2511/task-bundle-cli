@@ -174,7 +174,10 @@ def scaffold_bundle(
                         }
                     ],
                 },
-                "candidate": {"allowed_patch_paths": ["src"]},
+                "candidate": {
+                    "allowed_patch_paths": ["src"],
+                    "disallowed_patch_paths": [],
+                },
                 "validation": {"repetitions": 3},
                 "runtime": {
                     "cpus": 2,
@@ -237,13 +240,14 @@ def scaffold_bundle(
                 "Replace the solver-visible problem description.",
                 "Define dedicated evaluator-only PASS_TO_PASS and FAIL_TO_PASS tests.",
                 "Generate the hidden, solver-view, and gold patches.",
-                "Restrict candidate.allowed_patch_paths to implementation paths.",
+                "Restrict candidate.allowed_patch_paths and add any needed disallowed carve-outs.",
                 "Review and pin the generated Dockerfile and dependency installation.",
             ],
         },
         "next_steps": [
             "Replace the placeholder description, tests, and patches.",
-            "Set candidate.allowed_patch_paths to implementation files or subtrees only.",
+            "Set candidate.allowed_patch_paths to implementation files or subtrees and add "
+            "disallowed_patch_paths for excluded subtrees.",
             "Customize environment/Dockerfile for the target repository.",
             "Run `task validate --static` before `task init`.",
         ],

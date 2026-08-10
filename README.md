@@ -5,8 +5,8 @@ Task Bundle CLI is a local judge for coding tasks. It pins one repository revisi
 This repository contains:
 
 - the Python CLI in `src/taskbundle/`;
-- a validated SWE-bench Pro Ansible bundle in `examples/swe-bench-pro-ansible/`;
-- a checked-in pass/fail summary in `examples/swe-bench-pro-ansible/evaluation.json`;
+- two validated SWE-bench Pro Ansible bundles in `examples/`;
+- checked-in pass/fail summaries in each bundle's `evaluation.json`;
 - architecture, decisions, tradeoffs, and known limits in `DESIGN.md`.
 
 ## Install
@@ -64,9 +64,9 @@ uv run task doctor .
 
 [Docker Desktop](https://docs.docker.com/desktop/) is the Colima alternative on macOS and is also available on Windows and Linux. Start it before using the lifecycle. On Linux, [Docker Engine](https://docs.docker.com/engine/install/) can be installed directly instead; ensure the current user can access its daemon. Task Bundle CLI does not start either of these providers automatically.
 
-## Run the included bundle end to end
+## Run the primary included bundle end to end
 
-The included bundle is a real SWE-bench Pro Ansible task. Its repository commit, digest-pinned base image, test commands, evaluator patches, reference patch, and compact evaluation result are checked in.
+The primary included bundle is a real SWE-bench Pro Ansible task. Its repository commit, digest-pinned base image, test commands, evaluator patches, reference patch, and compact evaluation result are checked in.
 
 ### What is required?
 
@@ -207,6 +207,32 @@ With the bundle's three configured repetitions, validation records 30 attempts: 
 
 The checked-in [`evaluation.json`](examples/swe-bench-pro-ansible/evaluation.json) contains the review-friendly test summary and immutable run identifiers. Full logs, patch-application evidence, repository snapshots, provenance, and HTML reports are generated under the bundle's ignored `.taskbundle/` directory so normal runs do not bloat Git history.
 
+## Run the compact safe-eval sample
+
+`examples/swe-bench-pro-ansible-safe-eval/` is a second task from the same pinned SWE-bench Pro dataset revision. It asks the solver to deprecate Ansible's `safe_eval` entry points and make `check_type_dict` parse without executing input. One PASS_TO_PASS and one FAIL_TO_PASS selector keep this sample fast while exercising the same hidden-test, solver-view, candidate-policy, and evidence contracts.
+
+```bash
+uv run task validate examples/swe-bench-pro-ansible-safe-eval --static
+uv run task init examples/swe-bench-pro-ansible-safe-eval
+uv run task validate examples/swe-bench-pro-ansible-safe-eval
+
+uv run task run examples/swe-bench-pro-ansible-safe-eval \
+  --solver patch \
+  --candidate-patch examples/swe-bench-pro-ansible-safe-eval/gold.patch
+
+uv run task report --bundle examples/swe-bench-pro-ansible-safe-eval
+```
+
+With three repetitions, full validation records 12 attempts across baseline and golden phases. The positive-control run records 12 more across baseline and post-solver phases:
+
+| Phase | PASS_TO_PASS | FAIL_TO_PASS | Outcome |
+| --- | --- | --- | --- |
+| Baseline | 1 passes | 1 fails as expected | Valid task baseline |
+| Golden | 1 passes | 1 passes | Reference solution is valid |
+| Post-solver | 1 passes | 1 passes | Task resolved |
+
+The checked-in [`evaluation.json`](examples/swe-bench-pro-ansible-safe-eval/evaluation.json) records the resolved positive control. The selected test file is evaluator-owned and removed completely from the solver image; initialization also scans the entire sanitized filesystem and synthetic Git history for both declared markers.
+
 ## How the lifecycle works
 
 ```text
@@ -303,7 +329,7 @@ The important contract is:
 - `tests/hidden.patch` injects evaluator tests that are absent at the base commit;
 - `tests/solver-view.patch` deletes complete base-resident evaluator files from the solver source;
 - `tests.additional_protected_paths` lists generated or derived evaluator material;
-- `candidate.allowed_patch_paths` contains only implementation files or subtrees and must contain every path changed by `gold.patch`;
+- `candidate.allowed_patch_paths` contains implementation files or subtrees, while optional `candidate.disallowed_patch_paths` carves out literal subpaths that the solver may not change; deny rules win and every gold-patch path must remain allowed;
 - validation repetitions default to three and may be overridden from 1 through 20;
 - solver networking must remain `false`.
 
@@ -434,10 +460,12 @@ The regular suite uses deterministic fakes for fast coverage. The Docker test bu
 The release evidence was refreshed on 2026-08-10 with CLI 0.2.0:
 
 - static validation passed all seven authoring checks with no warnings;
-- the regular suite passed 118 tests with one opt-in Docker test skipped;
+- the regular suite passed 120 tests with one opt-in Docker test skipped;
 - the included Ansible bundle passed `doctor`, `init`, all 30 full-validation attempts, and all 30 positive-control run attempts with no mismatch or flaky observation;
 - patch run `20260810T074038843841Z-ba80516c` resolved, its report verified all 167 artifacts, and its deterministic evidence ZIP was exported successfully;
+- the safe-eval sample passed static validation, `init`, all 12 full-validation attempts, and all 12 positive-control attempts with no mismatch or flaky observation;
+- safe-eval patch run `20260810T085210444210Z-66d8c465` resolved and all 77 recorded artifacts passed integrity verification;
 - a one-repetition `stub` run completed cleanly as `unresolved`, proving the expected no-change path and its diagnostics;
 - the OpenRouter loop is covered with deterministic client fakes; a live model call remains an explicit, credit-consuming opt-in because it transfers the task description and requested repository context to OpenRouter.
 
-The compact, reviewable result is checked into `examples/swe-bench-pro-ansible/evaluation.json`; the larger local ledger and logs remain intentionally ignored.
+Compact, reviewable results are checked into each example's `evaluation.json`; the larger local ledgers and logs remain intentionally ignored.

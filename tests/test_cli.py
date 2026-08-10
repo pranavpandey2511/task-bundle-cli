@@ -60,6 +60,7 @@ def test_new_scaffolds_valid_bundle_and_is_logged(tmp_path: Path) -> None:
     manifest = json.loads((bundle / "task.json").read_text(encoding="utf-8"))
     assert manifest["schema_version"] == 3
     assert manifest["candidate"]["allowed_patch_paths"] == ["src"]
+    assert manifest["candidate"]["disallowed_patch_paths"] == []
     assert "/usr/local/bin/python -I -m pytest" in manifest["tests"]["fail_to_pass"][0]["command"]
 
 

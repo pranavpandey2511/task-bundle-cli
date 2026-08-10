@@ -1,0 +1,61 @@
+{
+  "schema_version": 3,
+  "id": "swebench-pro-ansible-d9f18662",
+  "repository": {
+    "url": "https://github.com/ansible/ansible.git",
+    "commit": "59ca05b70994b07a9507f61a0871146a4991b262"
+  },
+  "environment": {
+    "dockerfile": "environment/Dockerfile",
+    "workdir": "/workspace",
+    "smoke_command": "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTEST_ADDOPTS= /usr/local/bin/python -I -m pytest -q -c /dev/null --noconftest test/units/module_utils/common/validation/test_check_type_dict.py::test_check_type_dict",
+    "build_timeout_seconds": 3600,
+    "smoke_timeout_seconds": 300
+  },
+  "patches": {
+    "gold": "gold.patch",
+    "tests": "tests/hidden.patch",
+    "solver_view": "tests/solver-view.patch"
+  },
+  "tests": {
+    "pass_to_pass": [
+      {
+        "id": "check-type-dict-valid",
+        "command": "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTEST_ADDOPTS= /usr/local/bin/python -I -m pytest -q -c /dev/null --noconftest test/units/module_utils/common/validation/test_check_type_dict.py::test_check_type_dict",
+        "path": "test/units/module_utils/common/validation/test_check_type_dict.py",
+        "marker": "def test_check_type_dict():",
+        "timeout_seconds": 300
+      }
+    ],
+    "fail_to_pass": [
+      {
+        "id": "check-type-dict-invalid",
+        "command": "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTEST_ADDOPTS= /usr/local/bin/python -I -m pytest -q -c /dev/null --noconftest test/units/module_utils/common/validation/test_check_type_dict.py::test_check_type_dict_fail",
+        "path": "test/units/module_utils/common/validation/test_check_type_dict.py",
+        "marker": "        'k1=v1 k2'",
+        "timeout_seconds": 300
+      }
+    ]
+  },
+  "candidate": {
+    "allowed_patch_paths": [
+      "changelogs/fragments/deprecate-safe-evals.yml",
+      "lib/ansible/module_utils/basic.py",
+      "lib/ansible/module_utils/common/validation.py"
+    ],
+    "disallowed_patch_paths": []
+  },
+  "validation": {
+    "repetitions": 3
+  },
+  "runtime": {
+    "cpus": 2,
+    "memory": "2g",
+    "pids": 512,
+    "tmpfs_size": "512m",
+    "solver_timeout_seconds": 1800,
+    "max_patch_bytes": 10000000,
+    "solver_network": false,
+    "user": null
+  }
+}

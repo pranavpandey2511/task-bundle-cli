@@ -63,7 +63,8 @@
       "changelogs/fragments/75072_undefined_yaml.yml",
       "lib/ansible/parsing/yaml/dumper.py",
       "lib/ansible/plugins/filter/core.py"
-    ]
+    ],
+    "disallowed_patch_paths": []
   },
   "validation": {
     "repetitions": 3

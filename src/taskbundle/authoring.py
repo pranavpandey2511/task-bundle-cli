@@ -106,7 +106,8 @@ def check_bundle(bundle: Bundle) -> dict[str, Any]:
             "pass",
             (
                 f"Gold changes fit {len(bundle.manifest.candidate.allowed_patch_paths)} allowed "
-                "path roots and are disjoint from evaluator-owned paths."
+                f"path roots, avoid {len(bundle.manifest.candidate.disallowed_patch_paths)} "
+                "disallowed roots, and are disjoint from evaluator-owned paths."
             ),
         ),
     ]

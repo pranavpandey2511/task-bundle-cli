@@ -177,6 +177,28 @@ def test_patch_contract_requires_the_gold_solution_to_fit_candidate_policy(
     assert caught.value.details["gold_outside_allowed_paths"] == ["calculator.py"]
 
 
+def test_patch_contract_rejects_gold_changes_in_disallowed_candidate_paths(
+    valid_bundle_path: Path,
+) -> None:
+    payload = json.loads((valid_bundle_path / "task.json").read_text(encoding="utf-8"))
+    payload["candidate"]["disallowed_patch_paths"] = ["calculator.py"]
+    (valid_bundle_path / "task.json").write_text(
+        json.dumps(payload, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    bundle = load_bundle(valid_bundle_path)
+
+    with pytest.raises(InvalidTaskError, match="trust boundary") as caught:
+        validate_patch_contract(
+            bundle=bundle,
+            gold_patch=bundle.gold_patch_path.read_text(encoding="utf-8"),
+            test_patch=bundle.test_patch_path.read_text(encoding="utf-8"),
+            solver_view_patch=bundle.solver_view_patch_path.read_text(encoding="utf-8"),
+        )
+
+    assert caught.value.details["gold_disallowed_paths"] == ["calculator.py"]
+
+
 def test_patch_contract_covers_declared_derived_evaluator_artifacts(
     valid_bundle_path: Path,
 ) -> None:

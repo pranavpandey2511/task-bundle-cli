@@ -31,6 +31,8 @@ examples/swe-bench-pro-ansible/
 
 `task.json` declares which tests must already pass and which must change from fail to pass. The bundle also names the narrow paths a candidate may modify. This lets the engine use the same lifecycle for Python, Node, Go, Rust, or another stack while task authors keep ownership of the repository-specific commands and test contract.
 
+The second checked-in bundle, `examples/swe-bench-pro-ansible-safe-eval/`, deliberately uses one PASS_TO_PASS and one FAIL_TO_PASS selector. Both live in one evaluator-owned file, so its solver-view patch deletes that file completely and initialization proves the path and both markers are absent from the sanitized filesystem and synthetic Git history. Its small Python unit-test workload uses a 2 GB container ceiling; this avoids oversubscribing a shared local VM without weakening the engine's isolation controls.
+
 ## Decisions at a glance
 
 | Decision                               | Reason                                                            | Cost                                                                |
@@ -65,7 +67,7 @@ For example, `task run my-task --solver patch --candidate-patch fix.patch` is a 
 
 `gold.patch`, `tests/hidden.patch`, `tests/solver-view.patch`, the manifest, and reviewer evidence are trusted evaluator material. The solver receives none of them. Hidden tests add evaluator files missing from the base commit; the solver-view patch removes base-resident evaluator files. Public and non-bucket tests remain visible. Initialization scans the sanitized filesystem, environment, and synthetic Git history and fails closed if a protected marker is found or the scan cannot complete.
 
-Secrecy and candidate policy solve different problems. Redaction prevents the solver from reading selected tests before solving. The allow-list prevents it from replacing tests, configuration, runner-shadow modules, or unrelated code to manufacture a pass. Authors should therefore keep `candidate.allowed_patch_paths` as narrow as the legitimate implementation surface.
+Secrecy and candidate policy solve different problems. Redaction prevents the solver from reading selected tests before solving. The allow-list prevents it from replacing tests, configuration, runner-shadow modules, or unrelated code to manufacture a pass. Authors should therefore keep `candidate.allowed_patch_paths` as narrow as the legitimate implementation surface. When an implementation surface must be broad, `candidate.disallowed_patch_paths` can carve out literal descendant files or directories; a deny rule wins over an allow rule. Evaluator-owned paths remain an unconditional hard ban, and globs are not supported.
 
 The bundle author, Dockerfile, evaluator commands, CLI, and local Docker daemon are trusted. The solver and candidate patch are not. Docker protects the host and separates phases, but a generic exit-code harness cannot prove arbitrary candidate code behaved honestly inside a shared language process. High-assurance tasks should keep critical assertions in an external process that candidate code cannot control.
 

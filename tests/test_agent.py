@@ -179,3 +179,43 @@ def test_agent_rejects_write_outside_candidate_policy() -> None:
     assert docker.writes == []
     tool_result = client.requests[1][-1]
     assert "outside the allowed candidate policy" in str(tool_result)
+
+
+def test_agent_rejects_write_in_explicitly_disallowed_subtree() -> None:
+    client = FakeAgentClient(
+        [
+            tool_turn("write", "write_file", {"path": "src/vendor/code.py", "content": "bad\n"}),
+            tool_turn("finish", "finish", {"summary": "Could not edit excluded path."}),
+        ]
+    )
+    docker = FakeDocker()
+    settings = AgentSettings(
+        provider="openrouter",
+        model="openrouter/auto",
+        api_key_env="OPENROUTER_API_KEY",
+        api_key="secret-key",
+        endpoint="https://openrouter.ai/api/v1/chat/completions",
+        max_steps=4,
+        env_file=Path(".env"),
+    )
+
+    AgentSolver(
+        settings=settings,
+        description="Fix code.",
+        allowed_paths=["src"],
+        disallowed_paths=["src/vendor"],
+        client=client,
+    ).solve(
+        SolverContext(
+            docker=docker,  # type: ignore[arg-type]
+            container_id="solver",
+            workdir="/workspace",
+            timeout_seconds=60,
+            trusted_path="/usr/bin:/bin",
+        )
+    )
+
+    assert docker.writes == []
+    assert "Disallowed candidate paths" in str(client.requests[0])
+    assert "src/vendor" in str(client.requests[0])
+    assert "explicitly disallowed" in str(client.requests[1][-1])

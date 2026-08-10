@@ -424,6 +424,39 @@ def test_run_rejects_candidate_test_runner_shadow_files_before_grading(
     )
 
 
+def test_run_rejects_candidate_changes_in_explicitly_disallowed_paths_before_grading(
+    valid_bundle_path: Path,
+) -> None:
+    payload = json.loads((valid_bundle_path / "task.json").read_text(encoding="utf-8"))
+    payload["candidate"]["disallowed_patch_paths"] = ["solver-note.txt"]
+    (valid_bundle_path / "task.json").write_text(
+        json.dumps(payload, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    bundle = load_bundle(valid_bundle_path)
+    write_initialized_metadata(bundle)
+    runner = RunRunner(base_commit=bundle.manifest.repository.commit, solver_changes=True)
+    session = start_run_session(bundle)
+    try:
+        with pytest.raises(SolverError, match="candidate-edit policy") as caught:
+            run_task(
+                bundle=bundle,
+                session=session,
+                solver_override=ScriptedSolver("fix-and-disallowed-note"),
+                repetitions=1,
+                runner=runner,
+            )
+    finally:
+        session.close()
+
+    assert caught.value.details["outside_allowed_paths"] == []
+    assert caught.value.details["disallowed_paths"] == ["solver-note.txt"]
+    assert not any(
+        phase == "post_solver" and destination == "/tmp/taskbundle-tests.patch"
+        for phase, destination, _content in runner.streams
+    )
+
+
 def test_run_uses_one_immutable_hidden_patch_snapshot(valid_bundle_path: Path) -> None:
     bundle = load_bundle(valid_bundle_path)
     write_initialized_metadata(bundle)

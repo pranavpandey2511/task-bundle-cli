@@ -105,11 +105,15 @@ class AgentSolver:
         settings: AgentSettings,
         description: str,
         allowed_paths: list[str],
+        disallowed_paths: list[str] | None = None,
         client: AgentClient | None = None,
     ) -> None:
         self.settings = settings
         self.description = description
         self.allowed_paths = [PurePosixPath(path) for path in allowed_paths]
+        self.disallowed_paths = [
+            PurePosixPath(path) for path in (disallowed_paths or [])
+        ]
         self.client = client or OpenRouterClient(
             api_key=settings.api_key,
             model=settings.model,
@@ -145,6 +149,11 @@ class AgentSolver:
                     f"Problem:\n{self.description}\n\n"
                     "Allowed candidate paths:\n"
                     + "\n".join(f"- {path.as_posix()}" for path in self.allowed_paths)
+                    + "\n\nDisallowed candidate paths:\n"
+                    + (
+                        "\n".join(f"- {path.as_posix()}" for path in self.disallowed_paths)
+                        or "- (none)"
+                    )
                 ),
             },
         ]
@@ -280,6 +289,10 @@ class AgentSolver:
                 if len(content) > MAX_WRITE_CHARS:
                     raise ValueError(f"content exceeds {MAX_WRITE_CHARS} characters")
                 if not self._allows(path):
+                    if self._is_disallowed(path):
+                        raise ValueError(
+                            f"path is explicitly disallowed by candidate policy: {path}"
+                        )
                     raise ValueError(f"path is outside the allowed candidate policy: {path}")
                 destination = str(PurePosixPath(context.workdir) / path)
                 context.docker.stream_text(
@@ -326,7 +339,12 @@ class AgentSolver:
 
     def _allows(self, value: str) -> bool:
         path = PurePosixPath(value)
-        return any(path == root or root in path.parents for root in self.allowed_paths)
+        within_allowed = any(path == root or root in path.parents for root in self.allowed_paths)
+        return within_allowed and not self._is_disallowed(value)
+
+    def _is_disallowed(self, value: str) -> bool:
+        path = PurePosixPath(value)
+        return any(path == root or root in path.parents for root in self.disallowed_paths)
 
     @staticmethod
     def _safe_path(value: Any, *, allow_dot: bool = False) -> str:

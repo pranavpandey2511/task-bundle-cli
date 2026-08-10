@@ -392,12 +392,15 @@ def validate_patch_contract(
     missing = protected_paths - evaluator_paths
     gold_overlap = gold_paths & protected_paths
     unauthorized_gold = {path for path in gold_paths if not bundle.manifest.candidate.allows(path)}
+    disallowed_gold = {
+        path for path in gold_paths if bundle.manifest.candidate.is_disallowed(path)
+    }
     if unexpected or missing or gold_overlap or unauthorized_gold:
         raise InvalidTaskError(
             "Bundle patches do not preserve the evaluator-test trust boundary.",
             hint=(
                 "Limit tests/hidden.patch and tests/solver-view.patch to declared test paths, "
-                "and keep gold.patch out of those paths."
+                "and keep gold.patch within allowed, non-disallowed implementation paths."
             ),
             details={
                 "protected_paths": sorted(protected_paths),
@@ -405,10 +408,12 @@ def validate_patch_contract(
                 "uncovered_protected_paths": sorted(missing),
                 "gold_protected_overlap": sorted(gold_overlap),
                 "gold_outside_allowed_paths": sorted(unauthorized_gold),
+                "gold_disallowed_paths": sorted(disallowed_gold),
             },
         )
     return {
         "allowed_candidate_paths": sorted(bundle.manifest.candidate.allowed_patch_paths),
+        "disallowed_candidate_paths": sorted(bundle.manifest.candidate.disallowed_patch_paths),
         "protected_paths": sorted(protected_paths),
         "gold_paths": sorted(gold_paths),
         "test_paths": sorted(test_paths),
