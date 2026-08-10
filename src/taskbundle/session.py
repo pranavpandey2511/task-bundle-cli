@@ -26,7 +26,6 @@ SENSITIVE_ARGUMENT_NAMES = {
     "--password",
     "--repo",
     "--secret",
-    "--solver-cmd",
     "--token",
 }
 

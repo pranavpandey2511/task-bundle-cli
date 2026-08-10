@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from taskbundle.cli import _interrupt_on_sigterm as interrupt_on_sigterm
 from taskbundle.cli import app
 from taskbundle.errors import InfrastructureError
 from taskbundle.models import TestObservation as Observation
@@ -104,6 +105,11 @@ def test_primary_help_hides_compatibility_commands() -> None:
         assert re.search(rf"│\s+{legacy}\s+", result.output) is None
 
 
+def test_sigterm_uses_the_normal_interrupt_cleanup_path() -> None:
+    with pytest.raises(KeyboardInterrupt):
+        interrupt_on_sigterm(15, None)
+
+
 def test_lifecycle_help_describes_dual_images_and_secrecy_order() -> None:
     init_help = runner.invoke(app, ["init", "--help"])
     validate_help = runner.invoke(app, ["validate", "--help"])
@@ -117,8 +123,9 @@ def test_lifecycle_help_describes_dual_images_and_secrecy_order() -> None:
     assert "baseline and golden truth tables before running a solver" in normalized_validate
     assert "sanitized solver" in normalized_run
     assert "fresh evaluators" in normalized_run
-    assert "strict test secrecy" in normalized_run
-    assert "always rejects networking" in normalized_run
+    assert "--model" in normalized_run
+    assert "OPENROUTER_API_KEY" in normalized_run
+    assert "--solver-cmd" not in normalized_run
 
 
 def test_new_invalid_commit_returns_configuration_error(tmp_path: Path) -> None:

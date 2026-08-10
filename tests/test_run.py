@@ -19,6 +19,7 @@ from taskbundle.lifecycle.run import run_task
 from taskbundle.models import BuildMetadata
 from taskbundle.process import ProcessResult
 from taskbundle.session import CommandSession, sanitize_arguments
+from taskbundle.solvers import SolverContext, SolverOutcome
 
 IMAGE_ID = "sha256:" + "c" * 64
 CANDIDATE_PATCH = """diff --git a/calculator.py b/calculator.py
@@ -46,6 +47,25 @@ index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2
 +++ b/unittest.py
 """
 )
+
+
+class ScriptedSolver:
+    """Deterministic test double for lifecycle tests that need repository edits."""
+
+    name = "test-agent"
+
+    def __init__(self, command: str) -> None:
+        self.command = command
+
+    def solve(self, context: SolverContext) -> SolverOutcome:
+        process = context.docker.exec_command(
+            container_id=context.container_id,
+            workdir=context.workdir,
+            command=["/bin/sh", "-lc", self.command],
+            timeout_seconds=context.timeout_seconds,
+            trusted_path=context.trusted_path,
+        )
+        return SolverOutcome(adapter=self.name, process=process)
 
 
 def process_result(
@@ -120,6 +140,8 @@ class RunRunner:
         self.calls.append(command)
         assert argv[0] == "docker"
 
+        if argv[1] == "version":
+            return process_result(argv, stdout="29.6.2|29.6.2\n")
         if argv[1:3] == ["image", "inspect"]:
             return process_result(argv, stdout=f"{IMAGE_ID}\n")
         if argv[1] == "create":
@@ -265,7 +287,13 @@ def test_stub_run_is_unresolved_and_cleans_up_all_containers(valid_bundle_path: 
     session = start_run_session(bundle)
     try:
         with pytest.raises(UnresolvedError) as caught:
-            run_task(bundle=bundle, session=session, runner=runner, repetitions=1)
+            run_task(
+                bundle=bundle,
+                session=session,
+                solver_name="stub",
+                runner=runner,
+                repetitions=1,
+            )
         session.fail(caught.value)
         rows = session.database.get_test_results(session.command_id)
         artifacts = session.database.get_artifacts(session.command_id)
@@ -284,7 +312,7 @@ def test_stub_run_is_unresolved_and_cleans_up_all_containers(valid_bundle_path: 
     )
 
 
-def test_command_run_resolves_and_captures_untracked_files(valid_bundle_path: Path) -> None:
+def test_solver_run_resolves_and_captures_untracked_files(valid_bundle_path: Path) -> None:
     bundle = load_bundle(valid_bundle_path)
     write_initialized_metadata(bundle)
     runner = RunRunner(base_commit=bundle.manifest.repository.commit, solver_changes=True)
@@ -293,8 +321,7 @@ def test_command_run_resolves_and_captures_untracked_files(valid_bundle_path: Pa
         result = run_task(
             bundle=bundle,
             session=session,
-            solver_name="command",
-            solver_command="fix-the-repository",
+            solver_override=ScriptedSolver("fix-the-repository"),
             repetitions=1,
             runner=runner,
         )
@@ -337,7 +364,7 @@ def test_command_run_resolves_and_captures_untracked_files(valid_bundle_path: Pa
     assert all(IMAGE_ID in call for call in runner.calls if call[1] == "create")
 
 
-def test_command_run_captures_changes_even_when_solver_commits(
+def test_solver_run_captures_changes_even_when_solver_commits(
     valid_bundle_path: Path,
 ) -> None:
     bundle = load_bundle(valid_bundle_path)
@@ -352,8 +379,7 @@ def test_command_run_captures_changes_even_when_solver_commits(
         result = run_task(
             bundle=bundle,
             session=session,
-            solver_name="command",
-            solver_command="fix-and-commit",
+            solver_override=ScriptedSolver("fix-and-commit"),
             repetitions=1,
             runner=runner,
         )
@@ -384,8 +410,7 @@ def test_run_rejects_candidate_test_runner_shadow_files_before_grading(
             run_task(
                 bundle=bundle,
                 session=session,
-                solver_name="command",
-                solver_command="fix-and-shadow-runner",
+                solver_override=ScriptedSolver("fix-and-shadow-runner"),
                 repetitions=1,
                 runner=runner,
             )
@@ -413,8 +438,7 @@ def test_run_uses_one_immutable_hidden_patch_snapshot(valid_bundle_path: Path) -
         result = run_task(
             bundle=bundle,
             session=session,
-            solver_name="command",
-            solver_command="mutate-host-input",
+            solver_override=ScriptedSolver("mutate-host-input"),
             repetitions=1,
             runner=runner,
         )
@@ -497,8 +521,7 @@ new file mode 100644
         result = run_task(
             bundle=bundle,
             session=session,
-            solver_name="command",
-            solver_command="solve-sanitized-task",
+            solver_override=ScriptedSolver("solve-sanitized-task"),
             repetitions=1,
             runner=runner,
         )
@@ -538,8 +561,7 @@ def test_solver_description_cannot_contain_evaluator_marker(
             run_task(
                 bundle=bundle,
                 session=session,
-                solver_name="command",
-                solver_command="never-started",
+                solver_override=ScriptedSolver("never-started"),
                 repetitions=1,
                 runner=runner,
             )
@@ -559,8 +581,7 @@ def test_solver_timeout_is_solver_error_and_skips_post_grading(valid_bundle_path
             run_task(
                 bundle=bundle,
                 session=session,
-                solver_name="command",
-                solver_command="slow-agent",
+                solver_override=ScriptedSolver("slow-agent"),
                 repetitions=1,
                 runner=runner,
             )
@@ -586,8 +607,7 @@ def test_post_solver_timeout_is_unresolved_not_an_invalid_task(valid_bundle_path
             run_task(
                 bundle=bundle,
                 session=session,
-                solver_name="command",
-                solver_command="candidate-that-hangs-target",
+                solver_override=ScriptedSolver("candidate-that-hangs-target"),
                 repetitions=1,
                 runner=runner,
             )
@@ -612,8 +632,7 @@ def test_candidate_conflict_with_hidden_tests_is_unresolved(valid_bundle_path: P
             run_task(
                 bundle=bundle,
                 session=session,
-                solver_name="command",
-                solver_command="candidate-conflicts-with-tests",
+                solver_override=ScriptedSolver("candidate-conflicts-with-tests"),
                 repetitions=1,
                 runner=runner,
             )
@@ -636,8 +655,7 @@ def test_solver_interrupt_still_removes_solver_container(valid_bundle_path: Path
             run_task(
                 bundle=bundle,
                 session=session,
-                solver_name="command",
-                solver_command="interrupted-agent",
+                solver_override=ScriptedSolver("interrupted-agent"),
                 repetitions=1,
                 runner=runner,
             )
@@ -667,10 +685,70 @@ def test_network_is_rejected_by_the_strict_secrecy_contract(valid_bundle_path: P
         session.close()
 
 
-def test_solver_command_is_redacted_from_command_arguments() -> None:
-    arguments = ["run", ".", "--solver-cmd", "agent --token sensitive", "--json"]
+def test_default_agent_reports_missing_openrouter_key_before_docker(
+    valid_bundle_path: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    bundle = load_bundle(valid_bundle_path)
+    runner = RunRunner(base_commit=bundle.manifest.repository.commit)
+    session = start_run_session(bundle)
+    try:
+        with pytest.raises(ConfigurationError, match="OpenRouter API key was not found") as caught:
+            run_task(
+                bundle=bundle,
+                session=session,
+                agent_env_file=tmp_path / ".env",
+                repetitions=1,
+                runner=runner,
+            )
+    finally:
+        session.close()
 
-    assert sanitize_arguments(arguments) == ["run", ".", "--solver-cmd", "<redacted>", "--json"]
+    assert "OPENROUTER_API_KEY" in (caught.value.hint or "")
+    assert runner.calls == []
+
+
+@pytest.mark.parametrize(
+    ("solver_name", "agent_options", "expected_option"),
+    [
+        ("patch", {"agent_model": "provider/model"}, "--model"),
+        ("stub", {"agent_api_key_env": "CUSTOM_KEY"}, "--api-key-env"),
+        ("patch", {"agent_env_file": Path("agent.env")}, "--env-file"),
+        ("stub", {"agent_max_steps": 12}, "--agent-max-steps"),
+    ],
+)
+def test_non_agent_solvers_reject_agent_only_options(
+    valid_bundle_path: Path,
+    solver_name: str,
+    agent_options: dict[str, object],
+    expected_option: str,
+) -> None:
+    bundle = load_bundle(valid_bundle_path)
+    runner = RunRunner(base_commit=bundle.manifest.repository.commit)
+    session = start_run_session(bundle)
+    try:
+        with pytest.raises(ConfigurationError, match="does not accept OpenRouter") as caught:
+            run_task(
+                bundle=bundle,
+                session=session,
+                solver_name=solver_name,
+                repetitions=1,
+                runner=runner,
+                **agent_options,  # type: ignore[arg-type]
+            )
+    finally:
+        session.close()
+
+    assert expected_option in caught.value.details["unsupported_options"]
+    assert runner.calls == []
+
+
+def test_api_key_argument_is_redacted_from_command_arguments() -> None:
+    arguments = ["run", ".", "--api-key", "sensitive", "--json"]
+
+    assert sanitize_arguments(arguments) == ["run", ".", "--api-key", "<redacted>", "--json"]
 
 
 def test_run_reports_a_fixed_target_and_broken_regression(valid_bundle_path: Path) -> None:
@@ -687,8 +765,7 @@ def test_run_reports_a_fixed_target_and_broken_regression(valid_bundle_path: Pat
             run_task(
                 bundle=bundle,
                 session=session,
-                solver_name="command",
-                solver_command="fix-target-break-regression",
+                solver_override=ScriptedSolver("fix-target-break-regression"),
                 repetitions=1,
                 runner=runner,
             )

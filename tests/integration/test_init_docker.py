@@ -72,47 +72,39 @@ def test_task_init_builds_smokes_reuses_and_cleans_up(valid_bundle_path: Path) -
         assert stub_report["error"]["details"]["resolved"] is False
         assert stub_report["error"]["details"]["solver"]["patch_bytes"] == 0
 
-        solver_script = (
-            "if grep -R theta-hidden-evaluator-only /workspace /tmp; then exit 91; fi; "
-            "if grep -R -F 'self.assertEqual(add(10, 7), 17)' /workspace /tmp; "
-            "then exit 92; fi; "
-            "if grep -R -F 'self.assertEqual(subtract(10, 7), 3)' /workspace /tmp; "
-            "then exit 93; fi; "
-            "if git grep -Fq -- 'self.assertEqual(add(10, 7), 17)' "
-            "$(git rev-list --all) -- .; then exit 98; fi; "
-            "if git grep -Fq -- 'self.assertEqual(subtract(10, 7), 3)' "
-            "$(git rev-list --all) -- .; then exit 99; fi; "
-            "if test -e /tmp/taskbundle-tests.patch "
-            "-o -e /tmp/taskbundle-gold.patch "
-            "-o -e /tmp/taskbundle-solver-view.patch; then exit 94; fi; "
-            'if test -n "$(git remote)"; then exit 95; fi; '
-            "grep -q 'def test_add' test_public.py || exit 96; "
-            "PYTHONDONTWRITEBYTECODE=1 python -m unittest -q test_public.py || exit 97; "
-            "sed -i '/def subtract/,/return left + right/"
-            "s/return left + right/return left - right/' calculator.py; "
-            "printf 'captured\\n' > solver-note.txt"
+        candidate_patch = bundle / "candidate.patch"
+        candidate_patch.write_text(
+            (bundle / "gold.patch").read_text(encoding="utf-8")
+            + """diff --git a/solver-note.txt b/solver-note.txt
+new file mode 100644
+--- /dev/null
++++ b/solver-note.txt
+@@ -0,0 +1 @@
++captured
+""",
+            encoding="utf-8",
         )
-        command_run = runner.invoke(
+        candidate_run = runner.invoke(
             app,
             [
                 "run",
                 str(bundle),
                 "--solver",
-                "command",
-                "--solver-cmd",
-                solver_script,
+                "patch",
+                "--candidate-patch",
+                str(candidate_patch),
                 "--repetitions",
                 "1",
                 "--json",
             ],
         )
-        assert command_run.exit_code == 0, command_run.output
-        command_report = json.loads(command_run.stdout)
-        assert command_report["data"]["resolved"] is True
-        assert command_report["data"]["solver"]["patch_bytes"] > 0
+        assert candidate_run.exit_code == 0, candidate_run.output
+        candidate_report = json.loads(candidate_run.stdout)
+        assert candidate_report["data"]["resolved"] is True
+        assert candidate_report["data"]["solver"]["patch_bytes"] > 0
         pristine_snapshots = [
             bundle / ".taskbundle" / artifact
-            for artifact in command_report["data"]["snapshot_artifacts"]
+            for artifact in candidate_report["data"]["snapshot_artifacts"]
             if artifact.endswith("-pristine.json")
         ]
         assert len(pristine_snapshots) == 5
@@ -120,11 +112,11 @@ def test_task_init_builds_smokes_reuses_and_cleans_up(valid_bundle_path: Path) -
             snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
             assert snapshot["head_matches_base"] is True
             assert snapshot["dirty"] is False
-        command_patch = (
-            bundle / ".taskbundle" / command_report["data"]["solver"]["patch_artifact"]
+        captured_patch = (
+            bundle / ".taskbundle" / candidate_report["data"]["solver"]["patch_artifact"]
         ).read_text(encoding="utf-8")
-        assert "solver-note.txt" in command_patch
-        assert "theta-hidden-evaluator-only" not in command_patch
+        assert "solver-note.txt" in captured_patch
+        assert "theta-hidden-evaluator-only" not in captured_patch
 
         shadow_patch = bundle / "runner-shadow.patch"
         shadow_patch.write_text(
@@ -196,7 +188,7 @@ new file mode 100644
             app,
             [
                 "logs",
-                command_report["command_id"],
+                candidate_report["command_id"],
                 "--bundle",
                 str(bundle),
                 "--json",
@@ -212,7 +204,7 @@ new file mode 100644
             app,
             [
                 "artifacts",
-                command_report["command_id"],
+                candidate_report["command_id"],
                 "--bundle",
                 str(bundle),
                 "--json",

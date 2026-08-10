@@ -3,7 +3,10 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
+import pytest
+
 from taskbundle.engine.docker import DockerClient
+from taskbundle.errors import InfrastructureError
 from taskbundle.models import RuntimeSpec
 from taskbundle.process import ProcessResult
 
@@ -51,6 +54,111 @@ class SequenceRunner:
             duration_seconds=response.duration_seconds,
             timed_out=response.timed_out,
         )
+
+
+def test_versions_starts_selected_colima_profile_when_daemon_is_stopped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "DOCKER_HOST",
+        "unix:///Users/example/.colima/review/docker.sock",
+    )
+    runner = SequenceRunner(
+        [
+            result(
+                [],
+                exit_code=1,
+                stderr="Cannot connect to the Docker daemon. Is the docker daemon running?\n",
+            ),
+            result([], stdout="starting Colima\n"),
+            result([], stdout="29.6.2|29.6.2\n"),
+        ]
+    )
+
+    docker = DockerClient(runner, colima_executable="colima")
+
+    assert docker.versions().server == "29.6.2"
+    assert runner.calls == [
+        ("docker", "version", "--format", "{{.Client.Version}}|{{.Server.Version}}"),
+        ("colima", "start", "review"),
+        ("docker", "version", "--format", "{{.Client.Version}}|{{.Server.Version}}"),
+    ]
+    assert docker.readiness.auto_started is True
+    assert docker.readiness.profile == "review"
+
+
+def test_versions_reports_clear_colima_start_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "DOCKER_HOST",
+        "unix:///Users/example/.colima/default/docker.sock",
+    )
+    runner = SequenceRunner(
+        [
+            result(
+                [],
+                exit_code=1,
+                stderr="Cannot connect to the Docker daemon. Is the docker daemon running?\n",
+            ),
+            result([], exit_code=1, stderr="virtual machine could not start\n"),
+        ]
+    )
+
+    with pytest.raises(InfrastructureError, match="Could not start the configured Colima") as error:
+        DockerClient(runner, colima_executable="colima").versions()
+
+    assert "colima start default" in (error.value.hint or "")
+    assert error.value.details["colima_profile"] == "default"
+
+
+def test_versions_waits_for_colima_docker_socket(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "DOCKER_HOST",
+        "unix:///Users/example/.colima/default/docker.sock",
+    )
+    runner = SequenceRunner(
+        [
+            result([], exit_code=1, stderr="Cannot connect to the Docker daemon\n"),
+            result([], stdout="starting Colima\n"),
+            result([], exit_code=1, stderr="Cannot connect to the Docker daemon\n"),
+            result([], stdout="29.6.2|29.6.2\n"),
+        ]
+    )
+    delays: list[float] = []
+
+    docker = DockerClient(
+        runner,
+        colima_executable="colima",
+        readiness_attempts=2,
+        readiness_delay_seconds=0.25,
+        sleep=delays.append,
+    )
+
+    assert docker.versions().client == "29.6.2"
+    assert delays == [0.25]
+
+
+def test_versions_does_not_start_an_unrelated_docker_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("DOCKER_HOST", raising=False)
+    runner = SequenceRunner(
+        [
+            result([], exit_code=1, stderr="Cannot connect to the Docker daemon\n"),
+            result([], stdout="desktop-linux\n"),
+        ]
+    )
+
+    with pytest.raises(InfrastructureError, match="Could not query Docker"):
+        DockerClient(runner, colima_executable="colima").versions()
+
+    assert runner.calls == [
+        ("docker", "version", "--format", "{{.Client.Version}}|{{.Server.Version}}"),
+        ("docker", "context", "show"),
+    ]
 
 
 def test_smoke_container_is_isolated_and_removed_after_timeout() -> None:
@@ -124,39 +232,21 @@ def test_container_inputs_are_streamed_without_docker_cp(tmp_path: Path) -> None
     assert any('exec /bin/cat > "$1"' in argument for argument in command)
 
 
-def test_solver_network_and_secret_forwarding_are_explicit() -> None:
-    runner = SequenceRunner(
-        [
-            result([], stdout="solver-123\n"),
-            result([], stdout="ok\n"),
-        ]
-    )
+def test_solver_container_is_always_networkless() -> None:
+    runner = SequenceRunner([result([], stdout="solver-123\n")])
     docker = DockerClient(runner)
-    container_id = docker.create_solver(
+    docker.create_solver(
         image_tag="taskbundle/example:abc",
         container_name="taskbundle-example-solver",
         workdir="/workspace",
         runtime=RuntimeSpec(cpus=1, memory="512m", pids=64),
-        network_enabled=True,
-    )
-    docker.exec_command(
-        container_id=container_id,
-        workdir="/workspace",
-        command=["agent"],
-        timeout_seconds=10,
-        environment_names=["OPENAI_API_KEY"],
-        environment_values={"TASKBUNDLE_DESCRIPTION": "/tmp/description.md"},
     )
 
     create = runner.calls[0]
-    assert create[create.index("--network") + 1] == "bridge"
+    assert create[create.index("--network") + 1] == "none"
     assert "--volume" not in create
     assert create[create.index("--mount") + 1] == "type=volume,destination=/workspace"
     assert "--read-only" in create
-    execute = runner.calls[1]
-    assert execute[4:6] == ("--env", "OPENAI_API_KEY")
-    assert "TASKBUNDLE_DESCRIPTION=/tmp/description.md" in execute
-    assert all("secret-value" not in argument for argument in execute)
 
 
 def test_trusted_exec_path_overrides_candidate_controlled_path() -> None:
@@ -167,10 +257,8 @@ def test_trusted_exec_path_overrides_candidate_controlled_path() -> None:
         workdir="/workspace",
         command=["git", "status"],
         timeout_seconds=10,
-        environment_values={"PATH": "/workspace/bin"},
         trusted_path="/usr/bin:/bin",
     )
 
     execute = runner.calls[0]
     assert "PATH=/usr/bin:/bin" in execute
-    assert "PATH=/workspace/bin" not in execute

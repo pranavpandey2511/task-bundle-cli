@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Protocol
+from dataclasses import dataclass, field
+from typing import Any, Protocol
 
 from taskbundle.engine.docker import DockerClient
 from taskbundle.process import ProcessResult
@@ -15,7 +15,6 @@ class SolverContext:
     container_id: str
     workdir: str
     timeout_seconds: int
-    environment_names: list[str]
     trusted_path: str
 
 
@@ -23,6 +22,7 @@ class SolverContext:
 class SolverOutcome:
     adapter: str
     process: ProcessResult
+    details: dict[str, Any] = field(default_factory=dict)
 
 
 class Solver(Protocol):

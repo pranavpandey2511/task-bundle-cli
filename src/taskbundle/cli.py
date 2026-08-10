@@ -6,9 +6,11 @@ import json
 import os
 import shlex
 import shutil
+import signal
 import sys
 from collections.abc import Callable
 from pathlib import Path
+from types import FrameType
 from typing import Any
 
 import typer
@@ -21,6 +23,7 @@ from taskbundle.artifacts import verify_artifact_records
 from taskbundle.authoring import check_bundle
 from taskbundle.config import Bundle, load_bundle
 from taskbundle.diagnostics import diagnose_command
+from taskbundle.engine.docker import DockerClient
 from taskbundle.errors import (
     ConfigurationError,
     ErrorKind,
@@ -54,6 +57,12 @@ def _version_callback(value: bool) -> None:
     if value:
         typer.echo(__version__)
         raise typer.Exit()
+
+
+def _interrupt_on_sigterm(_signum: int, _frame: FrameType | None) -> None:
+    """Route service-manager termination through normal cleanup and reporting."""
+
+    raise KeyboardInterrupt
 
 
 @app.callback()
@@ -471,7 +480,7 @@ def _next_commands(report: CommandReport, bundle_root: Path) -> list[str]:
             return [lifecycle("init"), lifecycle("validate"), inspect("report", exact=True)]
         return [
             lifecycle("run", "--solver", "patch", "--candidate-patch", "candidate.patch"),
-            lifecycle("run", "--solver", "command", "--solver-cmd", "<offline solver command>"),
+            lifecycle("run", "--solver", "agent"),
             inspect("report"),
         ]
     if report.command == "run":
@@ -562,6 +571,8 @@ def _execute(
     operation: Operation,
 ) -> None:
     session = CommandSession.start(command_name=command_name, bundle_path=bundle_path)
+    previous_sigterm = signal.getsignal(signal.SIGTERM)
+    signal.signal(signal.SIGTERM, _interrupt_on_sigterm)
     try:
         try:
             data = operation(session)
@@ -592,6 +603,7 @@ def _execute(
             _render_failure(report)
             _render_guidance(report, session.state_dir.parent)
     finally:
+        signal.signal(signal.SIGTERM, previous_sigterm)
         session.close()
 
     exit_code = 0 if report.status.value == "succeeded" else _report_exit_code(report)
@@ -830,11 +842,15 @@ def validate_command(
 @app.command("run")
 def run_command(
     bundle: Path = typer.Argument(Path("."), help="Task bundle directory."),
-    solver: str = typer.Option("stub", "--solver", help="Solver adapter: stub, patch, or command."),
-    solver_command: str | None = typer.Option(
+    solver: str = typer.Option(
+        "agent",
+        "--solver",
+        help="Solver adapter: agent, patch, or stub.",
+    ),
+    model: str | None = typer.Option(
         None,
-        "--solver-cmd",
-        help="Offline command executed inside the sanitized solver container.",
+        "--model",
+        help="OpenRouter model; overrides OPENROUTER_MODEL and the built-in default.",
     ),
     candidate_patch: Path | None = typer.Option(
         None,
@@ -844,12 +860,24 @@ def run_command(
     allow_network: bool = typer.Option(
         False,
         "--allow-network",
-        help="Reserved compatibility flag; strict test secrecy always rejects networking.",
+        help="Reserved flag; direct solver-container networking is always rejected.",
     ),
-    secret_environment_names: list[str] | None = typer.Option(
-        None,
-        "--secret-env",
-        help="Environment-variable name to forward to the offline solver; repeat as needed.",
+    api_key_env: str = typer.Option(
+        "OPENROUTER_API_KEY",
+        "--api-key-env",
+        help="Environment variable containing the OpenRouter API key.",
+    ),
+    env_file: Path = typer.Option(
+        Path(".env"),
+        "--env-file",
+        help="Dotenv file for OpenRouter settings; shell variables take precedence.",
+    ),
+    agent_max_steps: int = typer.Option(
+        24,
+        "--agent-max-steps",
+        min=1,
+        max=100,
+        help="Maximum OpenRouter agent turns.",
     ),
     repetitions: int | None = typer.Option(
         None,
@@ -868,10 +896,12 @@ def run_command(
             bundle=loaded,
             session=session,
             solver_name=solver,
-            solver_command=solver_command,
             candidate_patch=candidate_patch,
             allow_network=allow_network,
-            secret_environment_names=secret_environment_names,
+            agent_model=model,
+            agent_api_key_env=api_key_env,
+            agent_env_file=env_file,
+            agent_max_steps=agent_max_steps,
             repetitions=repetitions,
         )
 
@@ -1231,12 +1261,24 @@ def doctor_command(
         if shutil.which(docker_executable) is None:
             checks.append({"name": "docker-daemon", "ok": False, "detail": "CLI unavailable"})
         else:
-            daemon = runner.run(
-                [docker_executable, "info", "--format", "{{.ServerVersion}}"],
-                timeout_seconds=15,
-            )
-            detail = (daemon.stdout or daemon.stderr).strip()
-            checks.append({"name": "docker-daemon", "ok": daemon.succeeded, "detail": detail})
+            try:
+                docker = DockerClient(runner, executable=docker_executable)
+                versions = docker.versions()
+                detail = f"client {versions.client}; server {versions.server}"
+                if docker.readiness.auto_started:
+                    detail += f"; started Colima profile {docker.readiness.profile} automatically"
+                checks.append(
+                    {
+                        "name": "docker-daemon",
+                        "ok": True,
+                        "detail": detail,
+                    }
+                )
+            except TaskBundleError as error:
+                detail = error.message
+                if error.hint:
+                    detail += f" {error.hint}"
+                checks.append({"name": "docker-daemon", "ok": False, "detail": detail})
 
         session.event("info", "doctor", "Environment checks completed.", {"checks": checks})
         failures = [check["name"] for check in checks if not check["ok"]]

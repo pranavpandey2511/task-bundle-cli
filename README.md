@@ -16,10 +16,13 @@ Requirements:
 - Python 3.12 or newer;
 - [uv](https://docs.astral.sh/uv/);
 - Git;
-- the Docker CLI and a running Docker-compatible daemon.
+- the Docker CLI and a local Docker-compatible daemon (for example, Colima or Docker Desktop).
 
 ```bash
 uv sync --frozen
+uv run task --help
+
+# Optional here; recommended before init, full validate, or run.
 uv run task doctor .
 ```
 
@@ -27,15 +30,17 @@ The examples below use `uv run task` so they work directly from this checkout. A
 
 ## Set up Docker first
 
-Task Bundle CLI uses the local Docker CLI to build images and start isolated containers. Installing only the `docker` command is not enough: it must be able to reach a running daemon. Check that before running the lifecycle:
+Docker is required for `init`, full `validate`, and `run`. It is not needed for `task new`, `task validate --static`, or reading an existing report. Choose one local Docker-compatible runtime: Colima, Docker Desktop, or Docker Engine. You do not need to install more than one.
+
+After installing your chosen runtime, this recommended check confirms the CLI and daemon are available:
 
 ```bash
+uv run task doctor .
 docker version
 docker run --rm hello-world
-uv run task doctor .
 ```
 
-### macOS: Colima
+### Option A: Colima on macOS
 
 [Colima](https://github.com/abiosoft/colima) is a lightweight Docker runtime for macOS. With Homebrew, install both the runtime and Docker client, then start the runtime:
 
@@ -46,41 +51,151 @@ docker run --rm hello-world
 uv run task doctor .
 ```
 
-Colima normally configures the Docker client when it starts. If `docker version` cannot reach the daemon, inspect `docker context ls`, make sure the Colima context is selected, and rerun `colima start` before retrying `task doctor`.
+After this first setup, when the active context is `colima` (or `DOCKER_HOST` points at a Colima socket), Task Bundle automatically runs `colima start <profile>` and waits for Docker during `init`, full `validate`, `run`, or `doctor`. It never starts Docker Desktop or another provider. Set `TASKBUNDLE_AUTO_START_COLIMA=0` to opt out.
 
-### Docker Desktop or other platforms
+If the command says the Docker socket is still unavailable, first run `docker version`. If it still fails and it is safe to interrupt existing containers, restart the reported profile and rerun the command:
 
-[Docker Desktop](https://docs.docker.com/desktop/) is a supported alternative on macOS, Windows, and Linux: install it, start it, then run the same three checks above. On a Linux host, install [Docker Engine](https://docs.docker.com/engine/install/) for the distribution and ensure the current user can access the daemon. The CLI only requires a Docker-compatible local engine; it does not require Docker Desktop specifically.
+```bash
+colima restart <profile>
+uv run task doctor .
+```
+
+### Option B: Docker Desktop or Docker Engine
+
+[Docker Desktop](https://docs.docker.com/desktop/) is the Colima alternative on macOS and is also available on Windows and Linux. Start it before using the lifecycle. On Linux, [Docker Engine](https://docs.docker.com/engine/install/) can be installed directly instead; ensure the current user can access its daemon. Task Bundle CLI does not start either of these providers automatically.
 
 ## Run the included bundle end to end
 
 The included bundle is a real SWE-bench Pro Ansible task. Its repository commit, digest-pinned base image, test commands, evaluator patches, reference patch, and compact evaluation result are checked in.
 
+### What is required?
+
+| Action | Status | When it is needed |
+| --- | --- | --- |
+| Install Python, uv, Git, and one Docker runtime | Required | Before the Docker-backed lifecycle can run. |
+| `task doctor` | Recommended | Before the first lifecycle run or when diagnosing the environment. |
+| `task validate --static` | Optional, recommended | Fast authoring checks without cloning or Docker. |
+| `task init` | Required | Before full validation or any solver run. Reuses verified images when possible. |
+| Full `task validate` | Required for complete bundle verification | Proves baseline and reference behavior; an already trusted initialized bundle can be run without repeating it every time. |
+| One solver run | Required to evaluate a candidate | Choose exactly one of `agent`, `patch`, or `stub`. |
+| `task report` | Recommended | Verifies evidence and explains the selected result. |
+| `--events` and `--export` | Optional | Use for a detailed timeline or portable reviewer evidence. |
+| OpenRouter configuration | Optional | Required only for the `agent` solver; not used by `patch` or `stub`. |
+
+### 1. Prepare and validate the bundle
+
 ```bash
-# 1. Fast contract checks; no clone or Docker container is needed.
+# Recommended environment check. It also starts a configured Colima profile.
+uv run task doctor .
+
+# Optional fast authoring checks; no clone or Docker is needed.
 uv run task validate examples/swe-bench-pro-ansible --static
 
-# 2. Build and verify separate evaluator and sanitized solver images.
+# Required before full validation or a solver run.
 uv run task init examples/swe-bench-pro-ansible
 
-# 3. Prove the baseline and reference-solution truth tables.
+# Required for the complete verification loop; proves the task contract.
 uv run task validate examples/swe-bench-pro-ansible
+```
 
-# 4. Use the checked-in gold patch as a positive-control solver output.
+### 2. Choose one solver
+
+| Solver | Use it when | Additional requirement | Expected role |
+| --- | --- | --- | --- |
+| `agent` (default) | You want an LLM agent to inspect and solve the task. | OpenRouter API key; may consume credits and send selected task context externally. | Produces and grades a new patch. |
+| `patch` | You already have a patch or want a deterministic offline run. | `--candidate-patch PATH` | Applies and grades the supplied patch. |
+| `stub` | You want to test the no-change and unresolved UX. | None | Makes no changes; normally exits unresolved. |
+
+#### Agent solver: optional OpenRouter-powered solution
+
+Use this only when you want the built-in LLM agent. Skip this entire setup when using `patch` or `stub`.
+
+Copy the example environment file and add your [OpenRouter](https://openrouter.ai/docs/quickstart) key. `.env` is ignored by Git.
+
+```bash
+cp .env.example .env
+# Edit .env:
+# OPENROUTER_API_KEY=sk-or-v1-...
+# OPENROUTER_MODEL=openrouter/auto
+
+uv run task run examples/swe-bench-pro-ansible --solver agent
+```
+
+`agent` is the default, so omitting `--solver` runs the same adapter. The host sends the problem, model-requested source excerpts, and command output to OpenRouter; API traffic and the key never enter the solver container. The model precedence is `--model`, shell `OPENROUTER_MODEL`, `.env`, then `openrouter/auto`.
+
+```bash
+# Equivalent default invocation.
+uv run task run examples/swe-bench-pro-ansible
+
+# Optional model override.
+uv run task run examples/swe-bench-pro-ansible \
+  --solver agent \
+  --model provider/model-id
+```
+
+The default `.env` path is relative to the invocation directory. Use `--env-file PATH` when it lives elsewhere, or `--api-key-env NAME` when the key uses another environment-variable name. Raw keys are never accepted as command arguments or persisted in reports.
+
+#### Patch solver: offline and reproducible alternative
+
+Use this when a patch was created elsewhere or when source must remain local. OpenRouter configuration is not needed. `--candidate-patch` is required.
+
+```bash
+# Grade the included reference patch as a deterministic positive control.
 uv run task run examples/swe-bench-pro-ansible \
   --solver patch \
   --candidate-patch examples/swe-bench-pro-ansible/gold.patch
 
-# 5. Verify and explain the newest lifecycle result.
+# Or grade your own patch.
+uv run task run examples/swe-bench-pro-ansible \
+  --solver patch \
+  --candidate-patch /path/to/candidate.patch
+```
+
+#### Stub solver: no-change diagnostic
+
+Use this only to exercise container setup, grading, reports, and unresolved-result messaging without modifying the repository. It needs neither OpenRouter nor a candidate patch and normally exits with code `1` because the task remains unresolved.
+
+```bash
+uv run task run examples/swe-bench-pro-ansible --solver stub
+```
+
+### 3. Review the result
+
+`task report` is recommended after any solver. It selects the latest lifecycle result unless a command ID is provided.
+
+```bash
+# Recommended: verify artifacts and explain the latest result.
 uv run task report --bundle examples/swe-bench-pro-ansible
 
-# Optional: inspect factual events or export a portable evidence package.
+# Optional: include the factual lifecycle timeline.
 uv run task report --bundle examples/swe-bench-pro-ansible --events
+
+# Optional: create a portable, deterministic evidence package.
 uv run task report --bundle examples/swe-bench-pro-ansible \
   --export /tmp/ansible-task-evidence.zip
 ```
 
-Each lifecycle summary prints the exact generated HTML path. Open `.taskbundle/reports/latest.html` for the newest review or `.taskbundle/reports/index.html` to browse all immutable command reports.
+The HTML path printed by each lifecycle command is immediately reviewable. Open `.taskbundle/reports/latest.html` for the newest report or `.taskbundle/reports/index.html` for all versions. Reports and exports can contain evaluator material; keep them on the reviewer side.
+
+### Complete reproducible example
+
+This copy-paste path uses the patch solver, so it needs Docker but no OpenRouter account, API key, model selection, or external source transfer.
+
+```bash
+uv sync --frozen
+uv run task doctor .
+uv run task validate examples/swe-bench-pro-ansible --static
+uv run task init examples/swe-bench-pro-ansible
+uv run task validate examples/swe-bench-pro-ansible
+
+uv run task run examples/swe-bench-pro-ansible \
+  --solver patch \
+  --candidate-patch examples/swe-bench-pro-ansible/gold.patch
+
+uv run task report --bundle examples/swe-bench-pro-ansible
+```
+
+The expected result is: static checks pass, initialization succeeds, all 30 baseline/golden expectations match, the positive-control run resolves all 30 baseline/post-solver expectations, and the report verifies every recorded artifact.
 
 With the bundle's three configured repetitions, validation records 30 attempts: five tests across baseline and golden phases, repeated three times. The positive-control run records 30 more attempts across baseline and post-solver phases. The expected compact result is:
 
@@ -130,11 +245,13 @@ uv run task new my-task \
   --repo https://github.com/example/project.git \
   --commit 0123456789abcdef0123456789abcdef01234567
 
-# Edit the generated draft, then:
+# Edit the generated draft, then prepare it:
 uv run task validate my-task --static
 uv run task init my-task
 uv run task validate my-task
-uv run task run my-task --solver patch --candidate-patch candidate.patch
+
+# Choose one solver. Agent is shown; it requires the optional OpenRouter setup.
+uv run task run my-task --solver agent
 uv run task report --bundle my-task
 ```
 
@@ -144,26 +261,22 @@ Every human-readable command that reaches the lifecycle boundary ends with `Summ
 uv run task report
 ```
 
-### Solver adapters
+### `task run` option reference
 
-```bash
-# Make no changes and exercise the normal unresolved path.
-uv run task run my-task --solver stub
+The solver-specific setup and examples are in [Choose one solver](#2-choose-one-solver). The adapters are mutually exclusive: `patch` requires `--candidate-patch`; `agent` and `stub` reject it.
 
-# Grade a patch produced elsewhere.
-uv run task run my-task \
-  --solver patch \
-  --candidate-patch candidate.patch
+| Option | Applies to | Meaning |
+| --- | --- | --- |
+| `--solver` | All runs | Select `agent` (default), `patch`, or `stub`. |
+| `--model MODEL` | Agent | Override `OPENROUTER_MODEL`. |
+| `--env-file PATH` | Agent | Read OpenRouter settings from this dotenv file; default is `.env`. |
+| `--api-key-env NAME` | Agent | Select the API-key variable; default is `OPENROUTER_API_KEY`. |
+| `--agent-max-steps N` | Agent | Bound model turns from 1–100; default is 24. |
+| `--candidate-patch PATH` | Patch | Supply the patch to grade; required for `patch`. |
+| `--repetitions N` | All runs | Override evaluation repetitions from 1–20. |
+| `--json` | All runs | Emit one machine-readable report on stdout. |
 
-# Run an offline agent or script inside the sanitized solver container.
-uv run task run my-task \
-  --solver command \
-  --solver-cmd '<offline solver command>'
-```
-
-The adapters are mutually exclusive. `patch` requires `--candidate-patch`; `command` requires `--solver-cmd`; `stub` accepts neither. In-container solver networking is deliberately disabled. A networked or remote model can produce a patch outside this boundary, then the patch adapter can grade it locally.
-
-`--secret-env NAME` forwards an existing host environment variable by name to a command solver without storing its value in arguments or reports. Avoid forwarding secrets unless necessary: an untrusted solver can still print a value into its own captured output.
+Agent-only options are rejected with `patch` and `stub`; `--candidate-patch` is rejected with `agent` and `stub`. `--allow-network` remains a compatibility flag that always fails because solver-container networking is not permitted. OpenRouter traffic originates from the trusted host process and does not require that flag.
 
 ## Author a bundle
 
@@ -222,7 +335,7 @@ Typer reports unknown commands, missing options, invalid ranges, and type errors
 - evidence-linked `details`;
 - a durable command ID and HTML/JSON report when reporting was possible.
 
-Human output is written to stderr. Once argument parsing succeeds, add `--json` to emit one machine-readable `CommandReport` on stdout, with no human footer. Parser-level usage mistakes use Typer's concise stderr diagnostics. Solver command text and secret values are excluded from stored reports; the solver-command hash and requested secret names are retained for provenance.
+Human output is written to stderr. Once argument parsing succeeds, add `--json` to emit one machine-readable `CommandReport` on stdout, with no human footer. Parser-level usage mistakes use Typer's concise stderr diagnostics. Secret values are never persisted; agent provenance retains only non-secret configuration such as the provider, requested model, API-key variable name, and step limit.
 
 | Exit | Meaning |
 | --- | --- |
@@ -299,7 +412,9 @@ Solver and evaluator containers have no host bind mount or Docker socket. Runtim
 
 Docker remains a local shared-kernel boundary. Task-authored Dockerfiles and evaluator inputs are trusted. Hostile multi-tenant execution should move to disposable workers or microVMs and add image policy, host-level egress controls, external watchdogs, and short-lived credentials. Detailed rationale and deferred work are in `DESIGN.md`.
 
-## Development
+## Development (optional)
+
+These commands are for contributors changing the CLI; bundle users do not need them.
 
 ```bash
 uv run ruff format --check .
@@ -319,9 +434,10 @@ The regular suite uses deterministic fakes for fast coverage. The Docker test bu
 The release evidence was refreshed on 2026-08-10 with CLI 0.2.0:
 
 - static validation passed all seven authoring checks with no warnings;
-- the regular suite passed 103 tests with one opt-in Docker test skipped;
-- the real Docker integration passed independently;
-- the included Ansible bundle passed `init`, all 30 validation attempts, and all 30 positive-control run attempts with no mismatch or flaky observation;
-- run `20260810T044632829714Z-614c9b61` resolved, and its portable evidence export verified all 167 recorded artifacts with no integrity failure.
+- the regular suite passed 118 tests with one opt-in Docker test skipped;
+- the included Ansible bundle passed `doctor`, `init`, all 30 full-validation attempts, and all 30 positive-control run attempts with no mismatch or flaky observation;
+- patch run `20260810T074038843841Z-ba80516c` resolved, its report verified all 167 artifacts, and its deterministic evidence ZIP was exported successfully;
+- a one-repetition `stub` run completed cleanly as `unresolved`, proving the expected no-change path and its diagnostics;
+- the OpenRouter loop is covered with deterministic client fakes; a live model call remains an explicit, credit-consuming opt-in because it transfers the task description and requested repository context to OpenRouter.
 
 The compact, reviewable result is checked into `examples/swe-bench-pro-ansible/evaluation.json`; the larger local ledger and logs remain intentionally ignored.

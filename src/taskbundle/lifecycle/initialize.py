@@ -389,6 +389,13 @@ def initialize_task(
     )
 
     versions = docker.versions()
+    if docker.readiness.auto_started:
+        session.event(
+            "info",
+            "docker",
+            "Started the configured Colima Docker daemon automatically.",
+            {"profile": docker.readiness.profile},
+        )
     metadata = None if force_rebuild else _read_metadata(cached_path)
     reused = False
     if metadata is not None:

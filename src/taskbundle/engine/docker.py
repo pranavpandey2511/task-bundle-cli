@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import os
+import re
+import shutil
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -17,28 +22,80 @@ class DockerVersions:
 
 
 @dataclass(frozen=True, slots=True)
+class DockerReadiness:
+    """How the Docker daemon became available for the current command."""
+
+    auto_started: bool = False
+    provider: str | None = None
+    profile: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class ImageBuildResult:
     image_id: str
     log: str
 
 
 class DockerClient:
-    def __init__(self, runner: Runner, *, executable: str = "docker") -> None:
+    def __init__(
+        self,
+        runner: Runner,
+        *,
+        executable: str = "docker",
+        colima_executable: str | None = None,
+        readiness_attempts: int = 12,
+        readiness_delay_seconds: float = 2,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
         self.runner = runner
         self.executable = executable
+        self.colima_executable = colima_executable or shutil.which("colima")
+        self.readiness_attempts = readiness_attempts
+        self.readiness_delay_seconds = readiness_delay_seconds
+        self.sleep = sleep
+        self._readiness = DockerReadiness()
 
     def _command(self, *arguments: str) -> list[str]:
         return [self.executable, *arguments]
 
+    @property
+    def readiness(self) -> DockerReadiness:
+        return self._readiness
+
     def versions(self) -> DockerVersions:
-        result = self.runner.run(
-            self._command(
-                "version",
-                "--format",
-                "{{.Client.Version}}|{{.Server.Version}}",
-            ),
-            timeout_seconds=15,
-        )
+        result = self._version_result()
+        if not result.succeeded and self._is_daemon_unavailable(result):
+            colima = self._selected_colima_profile()
+            if colima is not None and self._auto_start_colima_enabled():
+                profile, context = colima
+                original_error = result
+                self._start_colima(
+                    profile=profile,
+                    context=context,
+                    original_error=original_error,
+                )
+                result = self._wait_for_daemon()
+                if result.succeeded:
+                    self._readiness = DockerReadiness(
+                        auto_started=True,
+                        provider="colima",
+                        profile=profile,
+                    )
+                else:
+                    raise InfrastructureError(
+                        "Colima started, but its Docker socket did not become available.",
+                        hint=(
+                            f"Run `docker version`. If it still cannot connect and interrupting "
+                            "existing containers is safe, run "
+                            f"`colima restart {profile}` before retrying."
+                        ),
+                        details={
+                            "docker_context": context,
+                            "colima_profile": profile,
+                            "original_docker_error": self._result_details(original_error),
+                            "retry_docker_error": self._result_details(result),
+                        },
+                    )
         self._require_success(result, action="query Docker client and daemon versions")
         parts = result.stdout.strip().split("|", maxsplit=1)
         if len(parts) != 2 or not all(parts):
@@ -47,6 +104,109 @@ class DockerClient:
                 details={"output": result.stdout.strip()},
             )
         return DockerVersions(client=parts[0], server=parts[1])
+
+    def _version_result(self) -> ProcessResult:
+        return self.runner.run(
+            self._command(
+                "version",
+                "--format",
+                "{{.Client.Version}}|{{.Server.Version}}",
+            ),
+            timeout_seconds=15,
+        )
+
+    def _wait_for_daemon(self) -> ProcessResult:
+        """Allow Colima's host socket forwarder a bounded interval to come up."""
+
+        attempts = max(1, self.readiness_attempts)
+        result = self._version_result()
+        for _ in range(1, attempts):
+            if result.succeeded:
+                break
+            self.sleep(self.readiness_delay_seconds)
+            result = self._version_result()
+        return result
+
+    @staticmethod
+    def _is_daemon_unavailable(result: ProcessResult) -> bool:
+        combined = f"{result.stdout}\n{result.stderr}".lower()
+        indicators = (
+            "cannot connect to the docker daemon",
+            "is the docker daemon running",
+            "connection refused",
+            "error during connect",
+        )
+        return any(indicator in combined for indicator in indicators)
+
+    @staticmethod
+    def _auto_start_colima_enabled() -> bool:
+        value = os.environ.get("TASKBUNDLE_AUTO_START_COLIMA", "1").strip().lower()
+        return value not in {"0", "false", "no", "off"}
+
+    def _selected_colima_profile(self) -> tuple[str, str] | None:
+        host = os.environ.get("DOCKER_HOST", "")
+        match = re.search(r"\.colima/([^/]+)/docker\.sock(?:$|[?#])", host)
+        if match is not None:
+            return match.group(1), "DOCKER_HOST"
+
+        context = self.runner.run(self._command("context", "show"), timeout_seconds=10)
+        if not context.succeeded:
+            return None
+        selected = context.stdout.strip()
+        if selected == "colima":
+            return "default", selected
+        if selected.startswith("colima-") and len(selected) > len("colima-"):
+            return selected[len("colima-") :], selected
+        return None
+
+    def _start_colima(
+        self,
+        *,
+        profile: str,
+        context: str,
+        original_error: ProcessResult,
+    ) -> None:
+        if self.colima_executable is None:
+            raise InfrastructureError(
+                "The selected Docker context requires Colima, but Colima is not installed.",
+                hint=(
+                    "Install Colima and the Docker CLI (for example, "
+                    "`brew install colima docker`), "
+                    f"then run `colima start {profile}` and retry."
+                ),
+                details={
+                    "docker_context": context,
+                    "colima_profile": profile,
+                    "docker_error": self._result_details(original_error),
+                },
+            )
+        started = self.runner.run(
+            [self.colima_executable, "start", profile],
+            timeout_seconds=120,
+        )
+        if not started.succeeded:
+            raise InfrastructureError(
+                "Could not start the configured Colima Docker daemon.",
+                hint=(
+                    f"Run `colima start {profile}` directly to view its diagnostics, then retry "
+                    "the Task Bundle command."
+                ),
+                details={
+                    "docker_context": context,
+                    "colima_profile": profile,
+                    "docker_error": self._result_details(original_error),
+                    "colima_start": self._result_details(started),
+                },
+            )
+
+    @staticmethod
+    def _result_details(result: ProcessResult) -> dict[str, object]:
+        return {
+            "exit_code": result.exit_code,
+            "timed_out": result.timed_out,
+            "stdout": result.stdout[-4000:],
+            "stderr": result.stderr[-4000:],
+        }
 
     def inspect_image(self, image_tag: str) -> str | None:
         result = self.runner.run(
@@ -129,14 +289,13 @@ class DockerClient:
         container_name: str,
         workdir: str,
         runtime: RuntimeSpec,
-        network_enabled: bool,
     ) -> str:
         create = self._isolated_create_command(
             image_tag=image_tag,
             container_name=container_name,
             workdir=workdir,
             runtime=runtime,
-            network="bridge" if network_enabled else "none",
+            network="none",
             container_command=["-c", "while :; do /bin/sleep 3600; done"],
         )
         created = self.runner.run(create, timeout_seconds=30)
@@ -190,18 +349,11 @@ class DockerClient:
         workdir: str,
         command: list[str],
         timeout_seconds: int,
-        environment_names: list[str] | None = None,
-        environment_values: dict[str, str] | None = None,
         trusted_path: str | None = None,
     ) -> ProcessResult:
         docker_arguments = ["exec", "--workdir", workdir]
-        for name in environment_names or []:
-            docker_arguments.extend(["--env", name])
-        selected_values = dict(environment_values or {})
         if trusted_path is not None:
-            selected_values["PATH"] = trusted_path
-        for name, value in sorted(selected_values.items()):
-            docker_arguments.extend(["--env", f"{name}={value}"])
+            docker_arguments.extend(["--env", f"PATH={trusted_path}"])
         docker_arguments.extend([container_id, *command])
         return self.runner.run(
             self._command(*docker_arguments),

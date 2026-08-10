@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import os
-import re
 from pathlib import Path
 from typing import Any
 
+from taskbundle.agent_config import (
+    DEFAULT_AGENT_MAX_STEPS,
+    DEFAULT_OPENROUTER_API_KEY_ENV,
+    resolve_agent_settings,
+)
 from taskbundle.config import Bundle
 from taskbundle.engine.docker import DockerClient
 from taskbundle.errors import (
@@ -28,33 +32,60 @@ from taskbundle.process import ProcessRunner, Runner
 from taskbundle.provenance import sha256_text, write_execution_provenance
 from taskbundle.session import CommandSession
 from taskbundle.snapshots import capture_repository_snapshot, repository_snapshot_artifacts
-from taskbundle.solvers import CommandSolver, PatchSolver, Solver, SolverContext, StubSolver
-
-SECRET_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+from taskbundle.solvers import AgentSolver, PatchSolver, Solver, SolverContext, StubSolver
 
 
 def _solver_for(
     *,
     name: str,
-    command: str | None,
     candidate_patch: Path | None,
     max_patch_bytes: int,
+    description: str,
+    allowed_paths: list[str],
+    agent_model: str | None,
+    agent_api_key_env: str,
+    agent_env_file: Path,
+    agent_max_steps: int,
 ) -> tuple[Solver, str | None, Path | None]:
-    if name == "stub":
-        if command is not None or candidate_patch is not None:
+    if name in {"patch", "stub"}:
+        unsupported_agent_options: list[str] = []
+        if agent_model is not None:
+            unsupported_agent_options.append("--model")
+        if agent_api_key_env != DEFAULT_OPENROUTER_API_KEY_ENV:
+            unsupported_agent_options.append("--api-key-env")
+        if agent_env_file != Path(".env"):
+            unsupported_agent_options.append("--env-file")
+        if agent_max_steps != DEFAULT_AGENT_MAX_STEPS:
+            unsupported_agent_options.append("--agent-max-steps")
+        if unsupported_agent_options:
             raise ConfigurationError(
-                "The stub solver does not accept a command or candidate patch."
+                f"The {name} solver does not accept OpenRouter agent options.",
+                hint="Remove the agent-only options or use `--solver agent`.",
+                details={"unsupported_options": unsupported_agent_options},
             )
-        return StubSolver(), None, None
-    if name == "command":
-        if command is None or not command.strip():
-            raise ConfigurationError("The command solver requires a non-empty --solver-cmd.")
+    if name == "stub":
         if candidate_patch is not None:
-            raise ConfigurationError("The command solver does not accept --candidate-patch.")
-        return CommandSolver(command), None, None
+            raise ConfigurationError("The stub solver does not accept a candidate patch.")
+        return StubSolver(), None, None
+    if name == "agent":
+        if candidate_patch is not None:
+            raise ConfigurationError("The agent solver does not accept --candidate-patch.")
+        settings = resolve_agent_settings(
+            model=agent_model,
+            api_key_env=agent_api_key_env,
+            env_file=agent_env_file,
+            max_steps=agent_max_steps,
+        )
+        return (
+            AgentSolver(
+                settings=settings,
+                description=description,
+                allowed_paths=allowed_paths,
+            ),
+            None,
+            None,
+        )
     if name == "patch":
-        if command is not None:
-            raise ConfigurationError("The patch solver does not accept --solver-cmd.")
         if candidate_patch is None:
             raise ConfigurationError("The patch solver requires --candidate-patch.")
         resolved = candidate_patch.expanduser().resolve()
@@ -75,23 +106,8 @@ def _solver_for(
         return PatchSolver(content), content, resolved
     raise ConfigurationError(
         f"Unknown solver adapter: {name}",
-        hint="Choose one of: stub, patch, command.",
+        hint="Choose one of: agent, patch, stub.",
     )
-
-
-def _validated_secret_names(names: list[str]) -> list[str]:
-    selected: list[str] = []
-    for name in names:
-        if not SECRET_NAME.fullmatch(name):
-            raise ConfigurationError(
-                f"Invalid environment-variable name: {name}",
-                hint="--secret-env accepts names such as OPENAI_API_KEY, never secret values.",
-            )
-        if name not in os.environ:
-            raise ConfigurationError(f"Secret environment variable is not set: {name}")
-        if name not in selected:
-            selected.append(name)
-    return selected
 
 
 def _capture_patch(
@@ -232,13 +248,16 @@ def run_task(
     *,
     bundle: Bundle,
     session: CommandSession,
-    solver_name: str = "stub",
-    solver_command: str | None = None,
+    solver_name: str = "agent",
     candidate_patch: Path | None = None,
     allow_network: bool = False,
-    secret_environment_names: list[str] | None = None,
+    agent_model: str | None = None,
+    agent_api_key_env: str = DEFAULT_OPENROUTER_API_KEY_ENV,
+    agent_env_file: Path = Path(".env"),
+    agent_max_steps: int = DEFAULT_AGENT_MAX_STEPS,
     repetitions: int | None = None,
     runner: Runner | None = None,
+    solver_override: Solver | None = None,
 ) -> dict[str, Any]:
     selected_repetitions = (
         bundle.manifest.validation.repetitions if repetitions is None else repetitions
@@ -247,25 +266,14 @@ def run_task(
         raise ConfigurationError("Run repetitions must be between 1 and 20.")
     if allow_network:
         raise ConfigurationError(
-            "Solver network access is disabled by the strict test-secrecy contract.",
+            "Direct solver-container network access is disabled by the strict "
+            "test-secrecy contract.",
             hint=(
-                "Run a local/offline command solver, or obtain a candidate patch outside the "
-                "task boundary and grade it with --solver patch."
+                "The agent reaches OpenRouter from the trusted host control plane; it does not "
+                "need --allow-network."
             ),
         )
 
-    solver, candidate_input, candidate_input_path = _solver_for(
-        name=solver_name,
-        command=solver_command,
-        candidate_patch=candidate_patch,
-        max_patch_bytes=bundle.manifest.runtime.max_patch_bytes,
-    )
-    secret_names = _validated_secret_names(secret_environment_names or [])
-    process_runner = runner or ProcessRunner()
-    docker = DockerClient(
-        process_runner,
-        executable=os.environ.get("TASKBUNDLE_DOCKER_BIN", "docker"),
-    )
     inputs = snapshot_bundle_inputs(bundle=bundle, session=session)
     patch_contract = validate_patch_contract(
         bundle=bundle,
@@ -284,6 +292,24 @@ def run_task(
             hint="Remove evaluator-test source from description.md.",
             details={"conflicts": description_conflicts},
         )
+    if solver_override is not None:
+        if candidate_patch is not None:
+            raise ConfigurationError("A solver override cannot be combined with a candidate patch.")
+        solver = solver_override
+        candidate_input = None
+        candidate_input_path = None
+    else:
+        solver, candidate_input, candidate_input_path = _solver_for(
+            name=solver_name,
+            candidate_patch=candidate_patch,
+            max_patch_bytes=bundle.manifest.runtime.max_patch_bytes,
+            description=inputs.description,
+            allowed_paths=bundle.manifest.candidate.allowed_patch_paths,
+            agent_model=agent_model,
+            agent_api_key_env=agent_api_key_env,
+            agent_env_file=agent_env_file,
+            agent_max_steps=agent_max_steps,
+        )
     effective_network = False
 
     candidate_input_artifact: str | None = None
@@ -296,6 +322,20 @@ def run_task(
         )
         candidate_input_artifact = artifact.relative_to(session.state_dir).as_posix()
 
+    process_runner = runner or ProcessRunner()
+    docker = DockerClient(
+        process_runner,
+        executable=os.environ.get("TASKBUNDLE_DOCKER_BIN", "docker"),
+    )
+    docker.versions()
+    if docker.readiness.auto_started:
+        session.event(
+            "info",
+            "docker",
+            "Started the configured Colima Docker daemon automatically.",
+            {"profile": docker.readiness.profile},
+        )
+
     metadata = require_initialized_build(
         bundle=bundle,
         state_dir=session.state_dir,
@@ -307,10 +347,9 @@ def run_task(
     solver_provenance: dict[str, Any] = {
         "adapter": solver.name,
         "network": "bridge" if effective_network else "none",
-        "secret_environment_names": secret_names,
     }
-    if solver_command is not None:
-        solver_provenance["command_sha256"] = sha256_text(solver_command)
+    if isinstance(solver, AgentSolver):
+        solver_provenance.update(solver.provenance)
     if candidate_input is not None:
         solver_provenance["candidate_patch_sha256"] = sha256_text(candidate_input)
         solver_provenance["candidate_patch_source"] = str(candidate_input_path)
@@ -380,7 +419,6 @@ def run_task(
         container_name=container_name(bundle.manifest.id, f"{session.command_id}-solver"),
         workdir=bundle.manifest.environment.workdir,
         runtime=bundle.manifest.runtime,
-        network_enabled=effective_network,
     )
     session.event(
         "info",
@@ -390,7 +428,7 @@ def run_task(
             "container_id": solver_container,
             "adapter": solver.name,
             "isolation": partial["isolation"]["solver"],
-            "secret_environment_names": secret_names,
+            "agent": solver.provenance if isinstance(solver, AgentSolver) else None,
         },
     )
 
@@ -422,7 +460,6 @@ def run_task(
                 container_id=solver_container,
                 workdir=bundle.manifest.environment.workdir,
                 timeout_seconds=bundle.manifest.runtime.solver_timeout_seconds,
-                environment_names=secret_names,
                 trusted_path=bundle.manifest.environment.evaluator_path_value,
             )
         )
@@ -481,6 +518,7 @@ def run_task(
             "patch_sha256": patch_sha256,
             "patch_paths": sorted(patch_paths),
             "solver_base_commit": solver_base_commit,
+            **outcome.details,
         }
     finally:
         docker.remove_container(solver_container)

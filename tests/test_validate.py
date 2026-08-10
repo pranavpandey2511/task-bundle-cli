@@ -91,6 +91,8 @@ class ValidationRunner:
         self.calls.append(command)
         assert argv[0] == "docker"
 
+        if argv[1] == "version":
+            return process_result(argv, stdout="29.6.2|29.6.2\n")
         if argv[1:3] == ["image", "inspect"]:
             return process_result(argv, stdout=f"{IMAGE_ID}\n")
         if argv[1] == "create":

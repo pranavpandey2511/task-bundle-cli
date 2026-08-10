@@ -578,6 +578,14 @@ def validate_task(
         process_runner,
         executable=os.environ.get("TASKBUNDLE_DOCKER_BIN", "docker"),
     )
+    docker.versions()
+    if docker.readiness.auto_started:
+        session.event(
+            "info",
+            "docker",
+            "Started the configured Colima Docker daemon automatically.",
+            {"profile": docker.readiness.profile},
+        )
     inputs = snapshot_bundle_inputs(bundle=bundle, session=session)
     patch_contract = validate_patch_contract(
         bundle=bundle,
