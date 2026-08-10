@@ -27,6 +27,7 @@ from taskbundle.lifecycle.validate import (
     summarize_executions,
     verify_build_input_snapshot,
 )
+from taskbundle.models import EvaluatorIsolation
 from taskbundle.patches import PatchFormatError, changed_paths_from_patch, validate_patch_contract
 from taskbundle.process import ProcessRunner, Runner
 from taskbundle.provenance import sha256_text, write_execution_provenance
@@ -258,11 +259,17 @@ def run_task(
     agent_env_file: Path = Path(".env"),
     agent_max_steps: int = DEFAULT_AGENT_MAX_STEPS,
     repetitions: int | None = None,
+    evaluator_isolation: EvaluatorIsolation | None = None,
     runner: Runner | None = None,
     solver_override: Solver | None = None,
 ) -> dict[str, Any]:
     selected_repetitions = (
         bundle.manifest.validation.repetitions if repetitions is None else repetitions
+    )
+    selected_evaluator_isolation = (
+        bundle.manifest.validation.evaluator_isolation
+        if evaluator_isolation is None
+        else evaluator_isolation
     )
     if not 1 <= selected_repetitions <= 20:
         raise ConfigurationError("Run repetitions must be between 1 and 20.")
@@ -362,6 +369,7 @@ def run_task(
         session=session,
         command="run",
         repetitions=selected_repetitions,
+        evaluator_isolation=selected_evaluator_isolation,
         solver=solver_provenance,
         input_hashes=inputs.sha256,
     )
@@ -380,6 +388,7 @@ def run_task(
         phase="baseline",
         repetitions=selected_repetitions,
         inputs=inputs,
+        evaluator_isolation=selected_evaluator_isolation,
     )
     baseline_summary = summarize_executions(baseline)
     partial: dict[str, Any] = {
@@ -390,6 +399,7 @@ def run_task(
         "solver_image_tag": metadata.solver_image_tag,
         "solver_image_id": metadata.solver_image_id,
         "repetitions": selected_repetitions,
+        "evaluator_isolation": selected_evaluator_isolation.value,
         "baseline": baseline_summary,
         "provenance": provenance,
         "trusted_inputs": {"sha256": inputs.sha256, "artifacts": inputs.artifacts},
@@ -595,6 +605,7 @@ def run_task(
             phase="post_solver",
             repetitions=selected_repetitions,
             inputs=inputs,
+            evaluator_isolation=selected_evaluator_isolation,
             candidate_patch=patch_content if patch_bytes else None,
         )
     except TaskBundleError as error:

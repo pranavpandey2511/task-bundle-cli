@@ -201,9 +201,9 @@ uv run task run examples/swe-bench-pro-ansible \
 uv run task report --bundle examples/swe-bench-pro-ansible
 ```
 
-The expected result is: static checks pass, initialization succeeds, all 30 baseline/golden expectations match, the positive-control run resolves all 30 baseline/post-solver expectations, and the report verifies every recorded artifact.
+The expected result is: static checks pass, initialization succeeds, all 10 baseline/golden expectations match, the positive-control run resolves all 10 baseline/post-solver expectations, and the report verifies every recorded artifact.
 
-With the bundle's three configured repetitions, validation records 30 attempts: five tests across baseline and golden phases, repeated three times. The positive-control run records 30 more attempts across baseline and post-solver phases. The expected compact result is:
+With the default one repetition, validation records 10 attempts: five tests across baseline and golden phases. The positive-control run records 10 more attempts across baseline and post-solver phases. Each phase uses one evaluator container for all five selected tests. The expected compact result is:
 
 | Phase | PASS_TO_PASS | FAIL_TO_PASS | Outcome |
 | --- | --- | --- | --- |
@@ -211,7 +211,7 @@ With the bundle's three configured repetitions, validation records 30 attempts: 
 | Golden | 4 pass | 1 passes | Reference solution is valid |
 | Post-solver | 4 pass | 1 passes | Task resolved |
 
-The checked-in [`evaluation.json`](examples/swe-bench-pro-ansible/evaluation.json) contains the review-friendly test summary and immutable run identifiers. Full logs, patch-application evidence, repository snapshots, provenance, and HTML reports are generated under the bundle's ignored `.taskbundle/` directory so normal runs do not bloat Git history.
+The checked-in [`evaluation.json`](examples/swe-bench-pro-ansible/evaluation.json) contains the review-friendly test summary and immutable identifiers from the current one-repetition, phase-shared run. Full logs, patch-application evidence, repository snapshots, provenance, and HTML reports are generated under the bundle's ignored `.taskbundle/` directory so normal runs do not bloat Git history.
 
 ## Run the compact safe-eval sample
 
@@ -229,7 +229,7 @@ uv run task run examples/swe-bench-pro-ansible-safe-eval \
 uv run task report --bundle examples/swe-bench-pro-ansible-safe-eval
 ```
 
-With three repetitions, full validation records 12 attempts across baseline and golden phases. The positive-control run records 12 more across baseline and post-solver phases:
+With the default one repetition, full validation records four attempts across baseline and golden phases. The positive-control run records four more across baseline and post-solver phases. Each phase uses one evaluator container for both selected tests:
 
 | Phase | PASS_TO_PASS | FAIL_TO_PASS | Outcome |
 | --- | --- | --- | --- |
@@ -237,7 +237,7 @@ With three repetitions, full validation records 12 attempts across baseline and 
 | Golden | 1 passes | 1 passes | Reference solution is valid |
 | Post-solver | 1 passes | 1 passes | Task resolved |
 
-The checked-in [`evaluation.json`](examples/swe-bench-pro-ansible-safe-eval/evaluation.json) records the resolved positive control. The selected test file is evaluator-owned and removed completely from the solver image; initialization also scans the entire sanitized filesystem and synthetic Git history for both declared markers.
+The checked-in [`evaluation.json`](examples/swe-bench-pro-ansible-safe-eval/evaluation.json) records the current one-repetition, phase-shared positive control. The selected test file is evaluator-owned and removed completely from the solver image; initialization also scans the entire sanitized filesystem and synthetic Git history for both declared markers.
 
 ## How the lifecycle works
 
@@ -251,10 +251,12 @@ task.json + trusted bundle files
               │             └───► golden:   P2P pass, F2P pass
               │
               └─ task run ──────► sanitized solver → captured Git patch
-                            └───► fresh evaluators + hidden tests → result
+                            └───► fresh evaluator phase + hidden tests → result
 ```
 
-Each test attempt gets a fresh container and volume. A run repeats the baseline before invoking the solver, destroys the solver container after patch capture, rejects protected or unauthorized changed paths, and grades the patch in fresh evaluator containers. A run resolves only when every post-solver observation is a stable pass.
+By default, each phase and repetition gets one fresh evaluator container and disposable volume; all selected P2P and F2P tests run sequentially inside it. Baseline, golden, and post-solver never share a container because they use different repository states. A run repeats the baseline before invoking the solver, destroys the solver container after patch capture, rejects protected or unauthorized changed paths, and grades the patch in a fresh post-solver evaluator. A run resolves only when every post-solver observation matches its expectation.
+
+Use `--evaluator-isolation test-attempt` when every individual test attempt must start in a separate evaluator container. Use `--repetitions N` to run the selected isolation unit multiple times; in the default `phase` mode, each repetition receives a fresh phase container. Both settings can also be stored under `validation` in `task.json`, and command-line values take precedence.
 
 Only configured assertion-failure exit codes count as a legitimate `fail` observation; the default is exit code `1`. Timeouts and other nonzero exits are recorded as `timeout` or `error`, so a broken test runner cannot accidentally validate a FAIL_TO_PASS expectation.
 
@@ -306,6 +308,7 @@ The solver-specific setup and examples are in [Choose one solver](#2-choose-one-
 | `--agent-max-steps N` | Agent | Bound model turns from 1–100; default is 24. |
 | `--candidate-patch PATH` | Patch | Supply the patch to grade; required for `patch`. |
 | `--repetitions N` | All runs | Override evaluation repetitions from 1–20. |
+| `--evaluator-isolation MODE` | All runs | Override evaluator reuse with `phase` (default) or `test-attempt`. |
 | `--json` | All runs | Emit one machine-readable report on stdout. |
 
 Agent-only options are rejected with `patch` and `stub`; `--candidate-patch` is rejected with `agent` and `stub`. `--allow-network` remains a compatibility flag that always fails because solver-container networking is not permitted. OpenRouter traffic originates from the trusted host process and does not require that flag.
@@ -326,6 +329,25 @@ my-task/
     └── solver-view.patch
 ```
 
+The generated execution policy is:
+
+```json
+{
+  "validation": {
+    "repetitions": 1,
+    "evaluator_isolation": "phase"
+  }
+}
+```
+
+For a stricter certification run without editing the manifest:
+
+```bash
+uv run task validate my-task \
+  --repetitions 3 \
+  --evaluator-isolation test-attempt
+```
+
 The important contract is:
 
 - `repository.commit` is a full 40-character Git commit;
@@ -336,7 +358,8 @@ The important contract is:
 - `tests/solver-view.patch` deletes complete base-resident evaluator files from the solver source;
 - `tests.additional_protected_paths` lists generated or derived evaluator material;
 - `candidate.allowed_patch_paths` contains implementation files or subtrees, while optional `candidate.disallowed_patch_paths` carves out literal subpaths that the solver may not change; deny rules win and every gold-patch path must remain allowed;
-- validation repetitions default to three and may be overridden from 1 through 20;
+- validation repetitions default to one and may be overridden from 1 through 20;
+- `validation.evaluator_isolation` defaults to `phase`; use `test-attempt` for a fresh container per selected test attempt;
 - solver networking must remain `false`.
 
 `task validate --static` checks schemas, required files, path and symlink safety, trusted patch relationships, marker leakage into the description, candidate path policy, hashes, Docker base-image pinning, repository portability, and repetition settings. It does not claim the Git commit exists, the Dockerfile builds, or the declared tests behave correctly; `task init` and full `task validate` prove those facts.
@@ -440,7 +463,7 @@ These screenshots are reviewer-side evidence for this fixed example. Do not publ
 
 ## Isolation summary
 
-Solver and evaluator containers have no host bind mount or Docker socket. Runtime containers use a disposable workspace volume, read-only root filesystem, size-bounded tmpfs, CPU/memory/PID limits, dropped capabilities, `no-new-privileges`, a forced shell entrypoint, explicit timeouts, and no network. Solver state is destroyed before its patch is graded in fresh evaluators.
+Solver and evaluator containers have no host bind mount or Docker socket. Runtime containers use a disposable workspace volume, read-only root filesystem, size-bounded tmpfs, CPU/memory/PID limits, dropped capabilities, `no-new-privileges`, a forced shell entrypoint, explicit timeouts, and no network. Solver state is destroyed before its patch is graded in a fresh evaluator phase.
 
 Docker remains a local shared-kernel boundary. Task-authored Dockerfiles and evaluator inputs are trusted. Hostile multi-tenant execution should move to disposable workers or microVMs and add image policy, host-level egress controls, external watchdogs, and short-lived credentials. Detailed rationale and deferred work are in `DESIGN.md`.
 
@@ -463,15 +486,16 @@ The regular suite uses deterministic fakes for fast coverage. The Docker test bu
 
 ### Verified in this checkout
 
-The release evidence was refreshed on 2026-08-10 with CLI 0.2.0:
+The release evidence was refreshed on 2026-08-10 with CLI 0.3.0:
 
-- static validation passed all seven authoring checks with no warnings;
-- the regular suite passed 120 tests with one opt-in Docker test skipped;
-- the included Ansible bundle passed `doctor`, `init`, all 30 full-validation attempts, and all 30 positive-control run attempts with no mismatch or flaky observation;
-- patch run `20260810T074038843841Z-ba80516c` resolved, its report verified all 167 artifacts, and its deterministic evidence ZIP was exported successfully;
-- the safe-eval sample passed static validation, `init`, all 12 full-validation attempts, and all 12 positive-control attempts with no mismatch or flaky observation;
-- safe-eval patch run `20260810T085210444210Z-66d8c465` resolved and all 77 recorded artifacts passed integrity verification;
-- a one-repetition `stub` run completed cleanly as `unresolved`, proving the expected no-change path and its diagnostics;
+- static validation passed all eight authoring checks with no warnings for both included bundles;
+- the regular suite passed 135 tests with the one opt-in Docker test skipped;
+- the real Docker integration passed both default `phase` and strict `test-attempt` isolation paths against Colima;
+- the primary Ansible bundle passed `init`, all 10 full-validation attempts, and all 10 positive-control run attempts with no mismatch or flaky observation;
+- primary patch run `20260810T150302696585Z-f6616b39` resolved and all 35 recorded artifacts passed integrity verification;
+- the safe-eval sample passed `init`, all four full-validation attempts, and all four positive-control attempts with no mismatch or flaky observation;
+- safe-eval patch run `20260810T150513272923Z-3596adba` resolved and all 29 recorded artifacts passed integrity verification;
+- the offline source distribution and wheel build succeeded for version 0.3.0;
 - the OpenRouter loop is covered with deterministic client fakes; a live model call remains an explicit, credit-consuming opt-in because it transfers the task description and requested repository context to OpenRouter.
 
 Compact, reviewable results are checked into each example's `evaluation.json`; the larger local ledgers and logs remain intentionally ignored.

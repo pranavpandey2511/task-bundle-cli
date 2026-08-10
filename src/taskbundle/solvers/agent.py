@@ -111,9 +111,7 @@ class AgentSolver:
         self.settings = settings
         self.description = description
         self.allowed_paths = [PurePosixPath(path) for path in allowed_paths]
-        self.disallowed_paths = [
-            PurePosixPath(path) for path in (disallowed_paths or [])
-        ]
+        self.disallowed_paths = [PurePosixPath(path) for path in (disallowed_paths or [])]
         self.client = client or OpenRouterClient(
             api_key=settings.api_key,
             model=settings.model,

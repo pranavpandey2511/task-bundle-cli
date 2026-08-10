@@ -58,9 +58,28 @@ def test_task_init_builds_smokes_reuses_and_cleans_up(valid_bundle_path: Path) -
         assert validation.exit_code == 0, validation.output
         validation_report = json.loads(validation.stdout)
         assert validation_report["data"]["valid"] is True
-        assert validation_report["data"]["attempt_count"] == 12
+        assert validation_report["data"]["attempt_count"] == 4
+        assert validation_report["data"]["evaluator_isolation"] == "phase"
         assert validation_report["data"]["mismatches"] == []
         assert validation_report["data"]["flaky"] == []
+
+        strict_validation = runner.invoke(
+            app,
+            [
+                "validate",
+                str(bundle),
+                "--repetitions",
+                "1",
+                "--evaluator-isolation",
+                "test-attempt",
+                "--json",
+            ],
+        )
+        assert strict_validation.exit_code == 0, strict_validation.output
+        strict_report = json.loads(strict_validation.stdout)
+        assert strict_report["data"]["valid"] is True
+        assert strict_report["data"]["attempt_count"] == 4
+        assert strict_report["data"]["evaluator_isolation"] == "test-attempt"
 
         stub_run = runner.invoke(
             app,
@@ -107,7 +126,7 @@ new file mode 100644
             for artifact in candidate_report["data"]["snapshot_artifacts"]
             if artifact.endswith("-pristine.json")
         ]
-        assert len(pristine_snapshots) == 5
+        assert len(pristine_snapshots) == 3
         for snapshot_path in pristine_snapshots:
             snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
             assert snapshot["head_matches_base"] is True
@@ -179,7 +198,7 @@ new file mode 100644
         )
         assert logs.exit_code == 0, logs.output
         logs_report = json.loads(logs.stdout)
-        assert len(logs_report["data"]["test_results"]) == 12
+        assert len(logs_report["data"]["test_results"]) == 4
         assert any(
             artifact["kind"] == "validation_report" for artifact in logs_report["data"]["artifacts"]
         )

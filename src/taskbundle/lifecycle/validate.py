@@ -11,7 +11,13 @@ from taskbundle.config import Bundle
 from taskbundle.engine.docker import DockerClient
 from taskbundle.errors import InfrastructureError, InvalidTaskError, SolverError, UnresolvedError
 from taskbundle.lifecycle.initialize import require_initialized_build
-from taskbundle.models import BuildMetadata, TestObservation, TestResult, TestSpec
+from taskbundle.models import (
+    BuildMetadata,
+    EvaluatorIsolation,
+    TestObservation,
+    TestResult,
+    TestSpec,
+)
 from taskbundle.patches import validate_patch_contract
 from taskbundle.process import ProcessResult, ProcessRunner, Runner
 from taskbundle.provenance import sha256_text, write_execution_provenance
@@ -282,11 +288,11 @@ def _evaluation_container_name(
     bundle_id: str,
     command_id: str,
     phase: Phase,
-    suite: Suite,
-    test_id: str,
     attempt: int,
+    suite: Suite | None = None,
+    test_id: str | None = None,
 ) -> str:
-    identity = f"{command_id}:{phase}:{suite}:{test_id}:{attempt}"
+    identity = f"{command_id}:{phase}:{suite or 'all'}:{test_id or 'all'}:{attempt}"
     suffix = hashlib.sha256(identity.encode()).hexdigest()[:10]
     return f"taskbundle-{bundle_id[:24]}-{phase}-{suffix}"[:63]
 
@@ -318,6 +324,111 @@ def _verify_test_marker(
             "path": test.path,
             "exit_code": result.exit_code,
             "stderr": result.stderr[-4000:],
+        },
+    )
+
+
+def _prepare_evaluator(
+    *,
+    bundle: Bundle,
+    session: CommandSession,
+    docker: DockerClient,
+    container_id: str,
+    phase: Phase,
+    inputs: BundleInputs,
+    candidate_patch: str | None,
+    artifact_prefix: str,
+    snapshot_stage: str,
+) -> None:
+    trusted_path = bundle.manifest.environment.evaluator_path_value
+    capture_repository_snapshot(
+        docker=docker,
+        session=session,
+        container_id=container_id,
+        workdir=bundle.manifest.environment.workdir,
+        base_commit=bundle.manifest.repository.commit,
+        phase=phase,
+        stage=snapshot_stage,
+        require_pristine=True,
+        trusted_path=trusted_path,
+    )
+    # Evaluator material is injected before any untrusted candidate code runs.
+    # Streaming patches into /tmp and removing them immediately keeps their bytes
+    # outside the candidate-controlled repository and process environment.
+    if inputs.test_patch.strip():
+        docker.stream_text(
+            content=inputs.test_patch,
+            container_id=container_id,
+            destination="/tmp/taskbundle-tests.patch",
+        )
+        hidden_error: LifecycleErrorType = (
+            UnresolvedError if phase == "post_solver" else InvalidTaskError
+        )
+        _apply_patch(
+            docker=docker,
+            session=session,
+            container_id=container_id,
+            workdir=bundle.manifest.environment.workdir,
+            container_patch_path="/tmp/taskbundle-tests.patch",
+            label="hidden test patch",
+            artifact_name=f"{artifact_prefix}-hidden-tests",
+            trusted_path=trusted_path,
+            error_type=hidden_error,
+        )
+
+    if phase == "golden":
+        docker.stream_text(
+            content=inputs.gold_patch,
+            container_id=container_id,
+            destination="/tmp/taskbundle-gold.patch",
+        )
+        _apply_patch(
+            docker=docker,
+            session=session,
+            container_id=container_id,
+            workdir=bundle.manifest.environment.workdir,
+            container_patch_path="/tmp/taskbundle-gold.patch",
+            label="gold patch",
+            artifact_name=f"{artifact_prefix}-gold",
+            trusted_path=trusted_path,
+        )
+    elif candidate_patch:
+        docker.stream_text(
+            content=candidate_patch,
+            container_id=container_id,
+            destination="/tmp/taskbundle-candidate.patch",
+        )
+        _apply_patch(
+            docker=docker,
+            session=session,
+            container_id=container_id,
+            workdir=bundle.manifest.environment.workdir,
+            container_patch_path="/tmp/taskbundle-candidate.patch",
+            label="candidate patch",
+            artifact_name=f"{artifact_prefix}-candidate",
+            trusted_path=trusted_path,
+            error_type=SolverError,
+        )
+
+
+def _require_valid_observation(execution: TestExecution, *, phase: Phase) -> None:
+    if phase == "post_solver" or execution.result.observed not in {
+        TestObservation.TIMEOUT,
+        TestObservation.ERROR,
+    }:
+        return
+    result = execution.result
+    raise InvalidTaskError(
+        f"Test did not produce a valid pass/fail result: {phase} {result.suite} {result.test_id}",
+        hint="Inspect the test log and fix its command, dependencies, or timeout.",
+        details={
+            "phase": phase,
+            "suite": result.suite,
+            "test_id": result.test_id,
+            "attempt": result.attempt,
+            "observed": result.observed.value,
+            "exit_code": result.exit_code,
+            "log_artifact": result.log_artifact,
         },
     )
 
@@ -366,75 +477,17 @@ def _run_evaluation_attempt(
     trusted_path = bundle.manifest.environment.evaluator_path_value
     try:
         docker.start_detached(container_id)
-        capture_repository_snapshot(
-            docker=docker,
+        _prepare_evaluator(
+            bundle=bundle,
             session=session,
+            docker=docker,
             container_id=container_id,
-            workdir=bundle.manifest.environment.workdir,
-            base_commit=bundle.manifest.repository.commit,
             phase=phase,
-            stage=f"{suite}-{test.id}-{attempt}-pristine",
-            require_pristine=True,
-            trusted_path=trusted_path,
+            inputs=inputs,
+            candidate_patch=candidate_patch,
+            artifact_prefix=artifact_prefix,
+            snapshot_stage=f"{suite}-{test.id}-{attempt}-pristine",
         )
-        # Inject evaluator material while the repository is still pristine. In
-        # particular, an untrusted candidate must never run or influence PATH,
-        # Git attributes, or helpers before hidden bytes have been applied and
-        # removed from /tmp.
-        if inputs.test_patch.strip():
-            docker.stream_text(
-                content=inputs.test_patch,
-                container_id=container_id,
-                destination="/tmp/taskbundle-tests.patch",
-            )
-            hidden_error: LifecycleErrorType = (
-                UnresolvedError if phase == "post_solver" else InvalidTaskError
-            )
-            _apply_patch(
-                docker=docker,
-                session=session,
-                container_id=container_id,
-                workdir=bundle.manifest.environment.workdir,
-                container_patch_path="/tmp/taskbundle-tests.patch",
-                label="hidden test patch",
-                artifact_name=f"{artifact_prefix}-hidden-tests",
-                trusted_path=trusted_path,
-                error_type=hidden_error,
-            )
-
-        if phase == "golden":
-            docker.stream_text(
-                content=inputs.gold_patch,
-                container_id=container_id,
-                destination="/tmp/taskbundle-gold.patch",
-            )
-            _apply_patch(
-                docker=docker,
-                session=session,
-                container_id=container_id,
-                workdir=bundle.manifest.environment.workdir,
-                container_patch_path="/tmp/taskbundle-gold.patch",
-                label="gold patch",
-                artifact_name=f"{artifact_prefix}-gold",
-                trusted_path=trusted_path,
-            )
-        elif candidate_patch:
-            docker.stream_text(
-                content=candidate_patch,
-                container_id=container_id,
-                destination="/tmp/taskbundle-candidate.patch",
-            )
-            _apply_patch(
-                docker=docker,
-                session=session,
-                container_id=container_id,
-                workdir=bundle.manifest.environment.workdir,
-                container_patch_path="/tmp/taskbundle-candidate.patch",
-                label="candidate patch",
-                artifact_name=f"{artifact_prefix}-candidate",
-                trusted_path=trusted_path,
-                error_type=SolverError,
-            )
 
         _verify_test_marker(
             docker=docker,
@@ -455,23 +508,7 @@ def _run_evaluation_attempt(
             attempt=attempt,
             trusted_path=trusted_path,
         )
-        if phase != "post_solver" and execution.result.observed in {
-            TestObservation.TIMEOUT,
-            TestObservation.ERROR,
-        }:
-            raise InvalidTaskError(
-                f"Test did not produce a valid pass/fail result: {phase} {suite} {test.id}",
-                hint="Inspect the test log and fix its command, dependencies, or timeout.",
-                details={
-                    "phase": phase,
-                    "suite": suite,
-                    "test_id": test.id,
-                    "attempt": attempt,
-                    "observed": execution.result.observed.value,
-                    "exit_code": execution.result.exit_code,
-                    "log_artifact": execution.result.log_artifact,
-                },
-            )
+        _require_valid_observation(execution, phase=phase)
         return execution
     finally:
         docker.remove_container(container_id)
@@ -489,6 +526,98 @@ def _run_evaluation_attempt(
         )
 
 
+def _run_evaluation_repetition(
+    *,
+    bundle: Bundle,
+    session: CommandSession,
+    docker: DockerClient,
+    image_ref: str,
+    phase: Phase,
+    attempt: int,
+    inputs: BundleInputs,
+    candidate_patch: str | None,
+) -> list[TestExecution]:
+    name = _evaluation_container_name(
+        bundle_id=bundle.manifest.id,
+        command_id=session.command_id,
+        phase=phase,
+        attempt=attempt,
+    )
+    container_id = docker.create_evaluator(
+        image_tag=image_ref,
+        container_name=name,
+        workdir=bundle.manifest.environment.workdir,
+        runtime=bundle.manifest.runtime,
+        evaluator_path=bundle.manifest.environment.evaluator_path_value,
+    )
+    session.event(
+        "info",
+        phase,
+        "Evaluator container created for all selected tests in one repetition.",
+        {
+            "container_name": name,
+            "container_id": container_id,
+            "attempt": attempt,
+            "evaluator_isolation": EvaluatorIsolation.PHASE.value,
+        },
+    )
+    trusted_path = bundle.manifest.environment.evaluator_path_value
+    try:
+        docker.start_detached(container_id)
+        _prepare_evaluator(
+            bundle=bundle,
+            session=session,
+            docker=docker,
+            container_id=container_id,
+            phase=phase,
+            inputs=inputs,
+            candidate_patch=candidate_patch,
+            artifact_prefix=f"{phase}-attempt-{attempt}",
+            snapshot_stage=f"attempt-{attempt}-pristine",
+        )
+        executions: list[TestExecution] = []
+        suites: tuple[tuple[Suite, list[TestSpec]], ...] = (
+            ("pass_to_pass", bundle.manifest.tests.pass_to_pass),
+            ("fail_to_pass", bundle.manifest.tests.fail_to_pass),
+        )
+        for suite, tests in suites:
+            for test in tests:
+                _verify_test_marker(
+                    docker=docker,
+                    container_id=container_id,
+                    workdir=bundle.manifest.environment.workdir,
+                    test=test,
+                    phase=phase,
+                    trusted_path=trusted_path,
+                )
+                execution = _execute_test(
+                    docker=docker,
+                    session=session,
+                    container_id=container_id,
+                    workdir=bundle.manifest.environment.workdir,
+                    phase=phase,
+                    suite=suite,
+                    test=test,
+                    attempt=attempt,
+                    trusted_path=trusted_path,
+                )
+                _require_valid_observation(execution, phase=phase)
+                executions.append(execution)
+        return executions
+    finally:
+        docker.remove_container(container_id)
+        session.event(
+            "info",
+            "cleanup",
+            "Evaluator phase-repetition container removed.",
+            {
+                "phase": phase,
+                "attempt": attempt,
+                "container_id": container_id,
+            },
+        )
+
+
 def run_evaluation_phase(
     *,
     bundle: Bundle,
@@ -498,9 +627,26 @@ def run_evaluation_phase(
     phase: Phase,
     repetitions: int,
     inputs: BundleInputs,
+    evaluator_isolation: EvaluatorIsolation,
     candidate_patch: str | None = None,
 ) -> list[TestExecution]:
     executions: list[TestExecution] = []
+    if evaluator_isolation == EvaluatorIsolation.PHASE:
+        for attempt in range(1, repetitions + 1):
+            executions.extend(
+                _run_evaluation_repetition(
+                    bundle=bundle,
+                    session=session,
+                    docker=docker,
+                    image_ref=image_ref,
+                    phase=phase,
+                    attempt=attempt,
+                    inputs=inputs,
+                    candidate_patch=candidate_patch,
+                )
+            )
+        return executions
+
     suites: tuple[tuple[Suite, list[TestSpec]], ...] = (
         ("pass_to_pass", bundle.manifest.tests.pass_to_pass),
         ("fail_to_pass", bundle.manifest.tests.fail_to_pass),
@@ -565,10 +711,16 @@ def validate_task(
     bundle: Bundle,
     session: CommandSession,
     repetitions: int | None = None,
+    evaluator_isolation: EvaluatorIsolation | None = None,
     runner: Runner | None = None,
 ) -> dict[str, Any]:
     selected_repetitions = (
         bundle.manifest.validation.repetitions if repetitions is None else repetitions
+    )
+    selected_evaluator_isolation = (
+        bundle.manifest.validation.evaluator_isolation
+        if evaluator_isolation is None
+        else evaluator_isolation
     )
     if not 1 <= selected_repetitions <= 20:
         raise InvalidTaskError("Validation repetitions must be between 1 and 20.")
@@ -613,6 +765,7 @@ def validate_task(
         session=session,
         command="validate",
         repetitions=selected_repetitions,
+        evaluator_isolation=selected_evaluator_isolation,
         input_hashes=inputs.sha256,
     )
 
@@ -627,6 +780,7 @@ def validate_task(
                 phase=phase,
                 repetitions=selected_repetitions,
                 inputs=inputs,
+                evaluator_isolation=selected_evaluator_isolation,
             )
         )
     summary = summarize_executions(executions)
@@ -636,6 +790,7 @@ def validate_task(
         "image_tag": metadata.image_tag,
         "image_id": metadata.image_id,
         "repetitions": selected_repetitions,
+        "evaluator_isolation": selected_evaluator_isolation.value,
         "provenance": provenance,
         "trusted_inputs": {"sha256": inputs.sha256, "artifacts": inputs.artifacts},
         "patch_contract": patch_contract,

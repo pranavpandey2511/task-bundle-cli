@@ -498,6 +498,13 @@ def _run_context(report: CommandReport) -> str:
         ("Evaluator image", image.get("id", "not recorded")),
         ("Solver image", solver_image.get("id", "not recorded")),
         ("Repetitions", provenance.get("repetitions", payload.get("repetitions", "not recorded"))),
+        (
+            "Evaluator isolation",
+            provenance.get(
+                "evaluator_isolation",
+                payload.get("evaluator_isolation", "not recorded"),
+            ),
+        ),
         ("Runtime policy", runtime_summary),
     ]
     cards = "".join(

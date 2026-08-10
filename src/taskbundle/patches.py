@@ -392,9 +392,7 @@ def validate_patch_contract(
     missing = protected_paths - evaluator_paths
     gold_overlap = gold_paths & protected_paths
     unauthorized_gold = {path for path in gold_paths if not bundle.manifest.candidate.allows(path)}
-    disallowed_gold = {
-        path for path in gold_paths if bundle.manifest.candidate.is_disallowed(path)
-    }
+    disallowed_gold = {path for path in gold_paths if bundle.manifest.candidate.is_disallowed(path)}
     if unexpected or missing or gold_overlap or unauthorized_gold:
         raise InvalidTaskError(
             "Bundle patches do not preserve the evaluator-test trust boundary.",

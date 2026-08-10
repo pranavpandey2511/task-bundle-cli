@@ -8,11 +8,11 @@
   "docker_manifest_digest": "sha256:f9e1f9d428d55a8f26b27d89f29819b79a82b847fd252903c68221b2812ccd04",
   "local_base_image": "python:3.11-slim@sha256:90744cff8f32887f075c47d747a173ff333e9e98801667af93c357fa9f5e28ff",
   "bundle_schema_version": 3,
-  "cli_version": "0.2.0",
+  "cli_version": "0.3.0",
   "solver_view_sha256": "88fb511150e3117bd617eb577bd407c14f7fdbf549c263d489f4ea0693fa718e",
-  "initialized_command_id": "20260810T085105581441Z-ff7e8241",
-  "validated_command_id": "20260810T085140519437Z-6dca8dbe",
-  "resolved_run_command_id": "20260810T085210444210Z-66d8c465",
+  "initialized_command_id": "20260810T150335777560Z-9cfadd8e",
+  "validated_command_id": "20260810T150455755917Z-0f953428",
+  "resolved_run_command_id": "20260810T150513272923Z-3596adba",
   "environment_adaptation": "The official image is linux/amd64-only; the local ARM64 proof reconstructs its selected Python 3.11 unit-test dependencies from pinned versions.",
   "official_selected_test_file": "test/units/module_utils/common/validation/test_check_type_dict.py"
 }

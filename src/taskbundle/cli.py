@@ -35,7 +35,7 @@ from taskbundle.evidence import export_command_evidence
 from taskbundle.lifecycle.initialize import initialize_task
 from taskbundle.lifecycle.run import run_task
 from taskbundle.lifecycle.validate import validate_task
-from taskbundle.models import CommandReport
+from taskbundle.models import CommandReport, EvaluatorIsolation
 from taskbundle.process import ProcessRunner
 from taskbundle.scaffold import scaffold_bundle
 from taskbundle.session import CommandSession
@@ -383,9 +383,10 @@ def _result_summary(report: CommandReport) -> str:
             return f"Static contract passed with {data.get('warning_count', 0)} warning(s)."
         attempts = int(data.get("attempt_count", 0))
         flaky = len(data.get("flaky", []))
+        evaluator_isolation = data.get("evaluator_isolation", "not recorded")
         return (
             f"Truth table passed across {_quantity(attempts, 'test attempt')} with "
-            f"{_quantity(flaky, 'flaky test')}."
+            f"{_quantity(flaky, 'flaky test')} using {evaluator_isolation} evaluator isolation."
         )
     if report.command == "run":
         solver = data.get("solver", {})
@@ -817,6 +818,11 @@ def validate_command(
         max=20,
         help="Override the manifest's validation repetition count.",
     ),
+    evaluator_isolation: EvaluatorIsolation | None = typer.Option(
+        None,
+        "--evaluator-isolation",
+        help="Override evaluator reuse: phase or test-attempt.",
+    ),
     json_output: bool = typer.Option(False, "--json", help="Emit structured JSON."),
 ) -> None:
     """Verify baseline and golden truth tables before running a solver."""
@@ -832,7 +838,12 @@ def validate_command(
                 {"warning_count": result["warning_count"]},
             )
             return result
-        return validate_task(bundle=loaded, session=session, repetitions=repetitions)
+        return validate_task(
+            bundle=loaded,
+            session=session,
+            repetitions=repetitions,
+            evaluator_isolation=evaluator_isolation,
+        )
 
     _execute(
         command_name="validate", bundle_path=bundle, json_output=json_output, operation=operation
@@ -886,6 +897,11 @@ def run_command(
         max=20,
         help="Override the manifest's repetition count for preflight and grading.",
     ),
+    evaluator_isolation: EvaluatorIsolation | None = typer.Option(
+        None,
+        "--evaluator-isolation",
+        help="Override evaluator reuse: phase or test-attempt.",
+    ),
     json_output: bool = typer.Option(False, "--json", help="Emit structured JSON."),
 ) -> None:
     """Run a sanitized solver, enforce its patch policy, and grade in fresh evaluators."""
@@ -903,6 +919,7 @@ def run_command(
             agent_env_file=env_file,
             agent_max_steps=agent_max_steps,
             repetitions=repetitions,
+            evaluator_isolation=evaluator_isolation,
         )
 
     _execute(command_name="run", bundle_path=bundle, json_output=json_output, operation=operation)

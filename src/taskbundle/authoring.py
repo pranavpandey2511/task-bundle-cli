@@ -171,9 +171,9 @@ def check_bundle(bundle: Bundle) -> dict[str, Any]:
         checks.append(
             _check(
                 "flakiness-sampling",
-                "warning",
-                "One repetition is fast but cannot reveal inconsistent observations.",
-                "Use at least two repetitions for final validation; keep one while iterating.",
+                "pass",
+                "One repetition uses the fast default and does not sample for flakiness.",
+                "Use --repetitions 2 or more when certifying a task or investigating flakes.",
             )
         )
     else:
@@ -184,6 +184,18 @@ def check_bundle(bundle: Bundle) -> dict[str, Any]:
                 f"Final manifest requests {repetitions} attempts per selected test.",
             )
         )
+
+    checks.append(
+        _check(
+            "evaluator-isolation",
+            "pass",
+            (
+                "Selected tests share one evaluator per phase and repetition."
+                if bundle.manifest.validation.evaluator_isolation.value == "phase"
+                else "Every selected test attempt receives its own evaluator container."
+            ),
+        )
+    )
 
     input_paths = {
         "task.json": bundle.manifest_path,

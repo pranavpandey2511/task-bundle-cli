@@ -67,7 +67,8 @@
     "disallowed_patch_paths": []
   },
   "validation": {
-    "repetitions": 3
+    "repetitions": 1,
+    "evaluator_isolation": "phase"
   },
   "runtime": {
     "cpus": 2,

@@ -54,8 +54,10 @@ def test_checked_in_evaluation_summarizes_a_resolved_run() -> None:
     assert evaluation["task_id"] == "swebench-pro-ansible-12734fa2"
     assert evaluation["dataset_instance_id"] == provenance_instance_id()
     assert evaluation["resolved"] is True
-    assert evaluation["source_run"]["command_id"] == "20260810T074038843841Z-ba80516c"
-    assert evaluation["source_run"]["cli_version"] == "0.2.0"
+    assert evaluation["source_run"]["command_id"] == "20260810T150302696585Z-f6616b39"
+    assert evaluation["source_run"]["cli_version"] == "0.3.0"
+    assert evaluation["source_run"]["repetitions"] == 1
+    assert evaluation["source_run"]["evaluator_isolation"] == "phase"
     assert evaluation["source_run"]["candidate_input_sha256"] == sha256_file(EXAMPLE / "gold.patch")
     captured_patch = (
         EXAMPLE
@@ -120,6 +122,9 @@ def test_safe_eval_checked_in_evaluation_summarizes_a_resolved_run() -> None:
     assert evaluation["dataset_instance_id"] == provenance["instance_id"]
     assert evaluation["resolved"] is True
     assert evaluation["source_run"]["command_id"] == provenance["resolved_run_command_id"]
+    assert evaluation["source_run"]["cli_version"] == "0.3.0"
+    assert evaluation["source_run"]["repetitions"] == 1
+    assert evaluation["source_run"]["evaluator_isolation"] == "phase"
     assert evaluation["source_run"]["candidate_input_sha256"] == sha256_file(
         SAFE_EVAL_EXAMPLE / "gold.patch"
     )

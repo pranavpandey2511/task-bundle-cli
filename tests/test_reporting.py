@@ -94,6 +94,7 @@ def _solver_payload(*, resolved: bool, patch_artifact: str | None = None) -> dic
             "image": {"id": "sha256:" + "b" * 64},
             "solver_image": {"id": "sha256:" + "c" * 64},
             "repetitions": 1,
+            "evaluator_isolation": "phase",
             "runtime": {
                 "cpus": 1,
                 "memory": "512m",
@@ -152,6 +153,8 @@ def test_run_publishes_safe_evidence_linked_html_for_failure(
     assert "Candidate diff preview" in html
     assert "+return left - right" in html
     assert "Reproducibility context" in html
+    assert "Evaluator isolation" in html
+    assert "phase" in html
     assert "f" * 64 in html
     assert 'href="tests/subtracts-1.log"' in html
     assert "&lt;script&gt;alert" in html

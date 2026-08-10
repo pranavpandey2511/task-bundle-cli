@@ -9,7 +9,12 @@ from pydantic import ValidationError
 
 from taskbundle.config import load_bundle
 from taskbundle.errors import ConfigurationError
-from taskbundle.models import CommandReport, CommandStatus, TaskManifest
+from taskbundle.models import (
+    CommandReport,
+    CommandStatus,
+    EvaluatorIsolation,
+    TaskManifest,
+)
 
 
 def test_loads_valid_bundle(valid_bundle_path: Path) -> None:
@@ -19,6 +24,26 @@ def test_loads_valid_bundle(valid_bundle_path: Path) -> None:
     assert bundle.manifest.repository.commit
     assert bundle.test_patch_path.name == "hidden.patch"
     assert bundle.solver_view_patch_path.name == "solver-view.patch"
+    assert bundle.manifest.validation.repetitions == 1
+    assert bundle.manifest.validation.evaluator_isolation == EvaluatorIsolation.PHASE
+
+
+def test_validation_defaults_to_one_phase_shared_repetition(valid_bundle_path: Path) -> None:
+    payload = json.loads((valid_bundle_path / "task.json").read_text(encoding="utf-8"))
+    payload.pop("validation")
+
+    manifest = TaskManifest.model_validate(payload)
+
+    assert manifest.validation.repetitions == 1
+    assert manifest.validation.evaluator_isolation == EvaluatorIsolation.PHASE
+
+
+def test_rejects_unknown_evaluator_isolation(valid_bundle_path: Path) -> None:
+    payload = json.loads((valid_bundle_path / "task.json").read_text(encoding="utf-8"))
+    payload["validation"]["evaluator_isolation"] = "container-ish"
+
+    with pytest.raises(ValidationError, match="'phase' or 'test-attempt'"):
+        TaskManifest.model_validate(payload)
 
 
 def test_rejects_short_commit(valid_bundle_path: Path) -> None:

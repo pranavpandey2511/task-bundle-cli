@@ -10,7 +10,7 @@ from taskbundle.lifecycle.initialize import (
     sha256_file,
     solver_secrecy_contract_sha256,
 )
-from taskbundle.models import BuildMetadata
+from taskbundle.models import BuildMetadata, EvaluatorIsolation
 from taskbundle.provenance import build_execution_provenance
 
 
@@ -52,6 +52,17 @@ def test_execution_fingerprint_is_stable_and_changes_with_inputs(
     )
     assert first["execution_fingerprint"] == second["execution_fingerprint"]
     assert len(first["execution_fingerprint"]) == 64
+
+    strict = build_execution_provenance(
+        bundle=bundle,
+        metadata=metadata,
+        command="validate",
+        repetitions=3,
+        evaluator_isolation=EvaluatorIsolation.TEST_ATTEMPT,
+    )
+    assert first["evaluator_isolation"] == "phase"
+    assert strict["evaluator_isolation"] == "test-attempt"
+    assert strict["execution_fingerprint"] != first["execution_fingerprint"]
 
     bundle.description_path.write_text("changed task description\n", encoding="utf-8")
     changed = build_execution_provenance(

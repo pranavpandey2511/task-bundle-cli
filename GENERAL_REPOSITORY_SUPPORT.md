@@ -37,6 +37,8 @@ The important interface is therefore not a list of supported frameworks. It is a
 
 The engine can then validate the same truth table for every repository: existing behavior still passes, the target behavior fails at the base commit, and everything passes after the reference patch. Timeouts and broken runners remain errors rather than being mistaken for test failures.
 
+The execution policy remains language-neutral as well. By default, all selected checks for one phase run sequentially in one fresh evaluator container. A bundle or command can request `test-attempt` isolation when its framework cannot reliably clean shared state. Repetition count is independent: one is the throughput-oriented default, while additional repetitions sample for nondeterminism using a fresh isolation unit each time.
+
 Repository-specific setup would happen while building the image. This is where the bundle can use lockfiles, install compilers, or prepare generated assets. The resulting image should be identified by an immutable digest. Evaluation would then run without external network access by default, which makes repeated runs more reproducible and reduces dependency on live package registries.
 
 ## Illustrative configuration

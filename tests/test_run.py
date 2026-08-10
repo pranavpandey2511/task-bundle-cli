@@ -16,7 +16,7 @@ from taskbundle.lifecycle.initialize import (
     solver_secrecy_contract_sha256,
 )
 from taskbundle.lifecycle.run import run_task
-from taskbundle.models import BuildMetadata
+from taskbundle.models import BuildMetadata, EvaluatorIsolation
 from taskbundle.process import ProcessResult
 from taskbundle.session import CommandSession, sanitize_arguments
 from taskbundle.solvers import SolverContext, SolverOutcome
@@ -303,13 +303,39 @@ def test_stub_run_is_unresolved_and_cleans_up_all_containers(valid_bundle_path: 
     assert caught.value.details["resolved"] is False
     assert caught.value.details["solver"]["patch_bytes"] == 0
     assert len(rows) == 4
-    assert len([call for call in runner.calls if call[1] == "create"]) == 5
-    assert len([call for call in runner.calls if call[1] == "rm"]) == 5
+    assert caught.value.details["evaluator_isolation"] == "phase"
+    assert len([call for call in runner.calls if call[1] == "create"]) == 3
+    assert len([call for call in runner.calls if call[1] == "rm"]) == 3
     assert any(artifact["kind"] == "run_report" for artifact in artifacts)
     assert any(artifact["kind"] == "execution_provenance" for artifact in artifacts)
     assert (
-        len([artifact for artifact in artifacts if artifact["kind"] == "repository_snapshot"]) == 6
+        len([artifact for artifact in artifacts if artifact["kind"] == "repository_snapshot"]) == 4
     )
+
+
+def test_run_test_attempt_isolation_uses_fresh_evaluator_for_each_test(
+    valid_bundle_path: Path,
+) -> None:
+    bundle = load_bundle(valid_bundle_path)
+    write_initialized_metadata(bundle)
+    runner = RunRunner(base_commit=bundle.manifest.repository.commit)
+    session = start_run_session(bundle)
+    try:
+        with pytest.raises(UnresolvedError) as caught:
+            run_task(
+                bundle=bundle,
+                session=session,
+                solver_name="stub",
+                runner=runner,
+                repetitions=1,
+                evaluator_isolation=EvaluatorIsolation.TEST_ATTEMPT,
+            )
+    finally:
+        session.close()
+
+    assert caught.value.details["evaluator_isolation"] == "test-attempt"
+    assert len([call for call in runner.calls if call[1] == "create"]) == 5
+    assert len([call for call in runner.calls if call[1] == "rm"]) == 5
 
 
 def test_solver_run_resolves_and_captures_untracked_files(valid_bundle_path: Path) -> None:
@@ -335,7 +361,7 @@ def test_solver_run_resolves_and_captures_untracked_files(valid_bundle_path: Pat
     assert result["resolved"] is True
     assert "solver-note.txt" in patch
     assert result["solver"]["patch_bytes"] == len(CANDIDATE_PATCH.encode())
-    assert len(result["snapshot_artifacts"]) == 6
+    assert len(result["snapshot_artifacts"]) == 4
     assert len(result["provenance"]["execution_fingerprint"]) == 64
     assert any(
         runner._exec_parts(call)[1][:3] == ["git", "add", "-A"]
@@ -356,8 +382,6 @@ def test_solver_run_resolves_and_captures_untracked_files(valid_bundle_path: Pat
         destination for phase, destination, _content in runner.streams if phase == "post_solver"
     ]
     assert post_solver_destinations == [
-        "/tmp/taskbundle-tests.patch",
-        "/tmp/taskbundle-candidate.patch",
         "/tmp/taskbundle-tests.patch",
         "/tmp/taskbundle-candidate.patch",
     ]
@@ -622,8 +646,8 @@ def test_solver_timeout_is_solver_error_and_skips_post_grading(valid_bundle_path
     finally:
         session.close()
 
-    assert len([call for call in runner.calls if call[1] == "create"]) == 3
-    assert len([call for call in runner.calls if call[1] == "rm"]) == 3
+    assert len([call for call in runner.calls if call[1] == "create"]) == 2
+    assert len([call for call in runner.calls if call[1] == "rm"]) == 2
 
 
 def test_post_solver_timeout_is_unresolved_not_an_invalid_task(valid_bundle_path: Path) -> None:
@@ -697,7 +721,6 @@ def test_solver_interrupt_still_removes_solver_container(valid_bundle_path: Path
 
     removals = [call for call in runner.calls if call[1] == "rm"]
     assert removals == [
-        ("docker", "rm", "--force", "--volumes", "baseline-container"),
         ("docker", "rm", "--force", "--volumes", "baseline-container"),
         ("docker", "rm", "--force", "--volumes", "solver-container"),
     ]

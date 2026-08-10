@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "task-bundle-cli"
-version = "0.2.0"
+version = "0.3.0"
 description = "Build, validate, and grade coding-task bundles with isolated evaluator and solver containers."
 readme = "README.md"
 requires-python = ">=3.12"

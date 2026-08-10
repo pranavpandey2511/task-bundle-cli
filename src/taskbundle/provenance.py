@@ -9,7 +9,7 @@ from typing import Any
 
 from taskbundle import __version__
 from taskbundle.config import Bundle
-from taskbundle.models import BuildMetadata
+from taskbundle.models import BuildMetadata, EvaluatorIsolation
 from taskbundle.session import CommandSession
 
 
@@ -35,6 +35,7 @@ def build_execution_provenance(
     metadata: BuildMetadata,
     command: str,
     repetitions: int,
+    evaluator_isolation: EvaluatorIsolation = EvaluatorIsolation.PHASE,
     solver: dict[str, Any] | None = None,
     input_hashes: dict[str, str] | None = None,
 ) -> dict[str, Any]:
@@ -72,6 +73,7 @@ def build_execution_provenance(
         "inputs_sha256": stable_input_hashes,
         "runtime": bundle.manifest.runtime.model_dump(mode="json"),
         "repetitions": repetitions,
+        "evaluator_isolation": evaluator_isolation.value,
         "solver": solver,
     }
     normalized = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -85,6 +87,7 @@ def write_execution_provenance(
     session: CommandSession,
     command: str,
     repetitions: int,
+    evaluator_isolation: EvaluatorIsolation = EvaluatorIsolation.PHASE,
     solver: dict[str, Any] | None = None,
     input_hashes: dict[str, str] | None = None,
 ) -> dict[str, Any]:
@@ -93,6 +96,7 @@ def write_execution_provenance(
         metadata=metadata,
         command=command,
         repetitions=repetitions,
+        evaluator_isolation=evaluator_isolation,
         solver=solver,
         input_hashes=input_hashes,
     )

@@ -128,7 +128,7 @@ def valid_bundle_path(
             ],
         },
         "candidate": {"allowed_patch_paths": ["calculator.py", "solver-note.txt"]},
-        "validation": {"repetitions": 3},
+        "validation": {"repetitions": 1, "evaluator_isolation": "phase"},
         "runtime": {
             "cpus": 1,
             "memory": "512m",

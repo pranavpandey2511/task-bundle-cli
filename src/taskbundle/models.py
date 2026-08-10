@@ -210,8 +210,14 @@ class TestSuites(StrictModel):
         return selected | set(self.additional_protected_paths)
 
 
+class EvaluatorIsolation(StrEnum):
+    PHASE = "phase"
+    TEST_ATTEMPT = "test-attempt"
+
+
 class ValidationSpec(StrictModel):
-    repetitions: int = Field(default=3, ge=1, le=20)
+    repetitions: int = Field(default=1, ge=1, le=20)
+    evaluator_isolation: EvaluatorIsolation = EvaluatorIsolation.PHASE
 
 
 class RuntimeSpec(StrictModel):
@@ -239,11 +245,7 @@ class CandidateSpec(StrictModel):
 
     @model_validator(mode="after")
     def disallowed_paths_are_within_allowed_paths(self) -> Self:
-        outside = [
-            path
-            for path in self.disallowed_patch_paths
-            if not self.is_within_allowed(path)
-        ]
+        outside = [path for path in self.disallowed_patch_paths if not self.is_within_allowed(path)]
         if outside:
             raise ValueError(
                 "disallowed_patch_paths must be beneath an allowed_patch_paths root: "
@@ -258,14 +260,10 @@ class CandidateSpec(StrictModel):
         return path == policy_root or policy_root in path.parents
 
     def is_within_allowed(self, candidate_path: str) -> bool:
-        return any(
-            self._matches_root(candidate_path, root) for root in self.allowed_patch_paths
-        )
+        return any(self._matches_root(candidate_path, root) for root in self.allowed_patch_paths)
 
     def is_disallowed(self, candidate_path: str) -> bool:
-        return any(
-            self._matches_root(candidate_path, root) for root in self.disallowed_patch_paths
-        )
+        return any(self._matches_root(candidate_path, root) for root in self.disallowed_patch_paths)
 
     def allows(self, candidate_path: str) -> bool:
         return self.is_within_allowed(candidate_path) and not self.is_disallowed(candidate_path)

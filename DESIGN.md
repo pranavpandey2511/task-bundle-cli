@@ -49,7 +49,7 @@ These choices define what the task author must provide and what the CLI guarante
 
 6. **Keep model access on the trusted host.** The optional OpenRouter agent is driven by the CLI on the host; its API key and network traffic never enter the solver container. The `patch` and `stub` solvers provide offline alternatives that use the same grading path. This protects credentials and preserves one evaluation boundary, while live agent runs remain model-dependent and may consume external API credits.
 
-7. **Use a fresh container for every test attempt.** Each repetition starts from the same image in a new container and disposable work volume. State created by one check cannot leak into the next check or phase, and inconsistent repetitions are reported as flakiness. This improves attribution and repeatability at the cost of slower evaluation.
+7. **Reuse one evaluator within a phase by default, with strict isolation available.** The default `phase` mode creates one evaluator container and disposable work volume per phase and repetition, then runs every selected test sequentially inside it. Baseline, golden, and post-solver always remain separate. `test-attempt` mode retains a fresh container for every individual test attempt when cross-test state is a known risk. This makes RL rollouts substantially cheaper while keeping the stronger diagnostic mode explicit.
 
 8. **Generate reports from recorded evidence, not a second execution service.** Lifecycle commands store events, logs, test observations, hashes, and patches in the local evidence ledger. Static HTML reports only render that recorded data; they never rerun tests or invoke a solver. Review stays simple and auditable, but reports are local evaluator artifacts and can contain private test information.
 
@@ -66,13 +66,15 @@ Together, these decisions keep repository-specific knowledge inside the task bun
 | Baseline with evaluator tests   | pass         | fail         |
 | Gold patch with evaluator tests | pass         | pass         |
 
-Only exit code `0` is a pass. Configured assertion exits, normally `1`, are failures; timeouts and unexpected nonzero exits remain distinct errors. Every test is repeated in a fresh container and volume. All repetitions must agree, so a flaky test or broken runner cannot accidentally validate a task.
+Only exit code `0` is a pass. Configured assertion exits, normally `1`, are failures; timeouts and unexpected nonzero exits remain distinct errors. Validation defaults to one repetition. When repetitions are increased, every repetition starts with a fresh evaluator and all observations must agree, so a flaky test or broken runner cannot accidentally validate a task.
+
+Evaluator isolation is separate from repetition count. In `phase` mode, one phase/repetition container runs the P2P commands followed by the F2P commands. A stateful test can therefore influence a later test inside that phase. Task authors should use self-cleaning tests and switch to `--evaluator-isolation test-attempt` when certifying a new task, investigating order dependence, or executing checks known to mutate shared state. The execution fingerprint, JSON result, and HTML report record both choices.
 
 `task run` repeats the baseline before invoking one solver adapter. `agent` is the default and is the only adapter that needs optional OpenRouter configuration; the host gives that model structured tools for the sanitized container. `patch` instead grades a locally supplied patch, while `stub` deliberately makes no change to exercise the unresolved path. Every adapter produces the same review boundary: the engine captures a binary/full-index Git patch, destroys the solver container, rejects protected or out-of-policy paths, then grades the patch in fresh evaluator containers. A run resolves only when every post-solver observation is a stable pass.
 
 For example, `task run my-task --solver patch --candidate-patch fix.patch` is a fully local, reproducible positive-control path. `task run my-task --solver agent --model provider/model-id` is an optional live attempt that can consume credits and sends the problem plus model-requested source excerpts to OpenRouter. `task run my-task --solver stub` is useful when reviewing failure messages and reports without a candidate change.
 
-## Security and trust boundary
+## Test secrecy and trust boundary
 
 The system has an explicit trust model:
 
@@ -93,7 +95,7 @@ Test secrecy and patch policy protect different things:
 
 `candidate.allowed_patch_paths` should therefore name only the legitimate implementation surface. `candidate.disallowed_patch_paths` can exclude sensitive descendants from a broader allowed directory. Deny rules win, evaluator-owned paths are always forbidden, and path globs are not supported.
 
-### Isolating execution
+## Runtime isolation
 
 Solver and evaluator containers run with:
 
@@ -107,7 +109,7 @@ OpenRouter requests run from the trusted host process, so the API key never ente
 
 This is strong isolation for a local tool, not hostile multi-tenant security. Containers still share the host kernel, and candidate code may influence assertions executed inside the same language process. High-assurance checks should run critical assertions from an external trusted process. A hosted service would also need disposable workers or microVMs, image scanning, host-level egress controls, quotas, watchdogs, and short-lived credentials.
 
-## Reproducibility and evidence
+## Reproducibility and determinism
 
 The CLI separates repeatable inputs from run-specific evidence.
 
@@ -117,13 +119,13 @@ The CLI separates repeatable inputs from run-specific evidence.
 - Build identity includes the CLI and staging versions, repository and commit, bundle ID, workdir, Dockerfile, solver-view patch, and secrecy rules.
 - Validation and run snapshot and hash the manifest, description, Dockerfile, and evaluator patches before doing any work.
 - Immutable image IDs are recorded and verified; cached image tags are only shortcuts.
-- Provenance records runtime limits, repetitions, image IDs, solver adapter, network policy, model request, and candidate-input hash.
+- Provenance records runtime limits, repetitions, evaluator isolation, image IDs, solver adapter, network policy, model request, and candidate-input hash.
 
 Model generation is not deterministic. For agent runs, the evidence also records the routed model, steps, and token usage, but the captured candidate patch and its evaluator results remain the reviewable boundary.
 
 Exact behavior across machines still depends on the bundle: base images should be pinned by digest, dependencies locked, and architecture and locale controlled. Timestamps, command IDs, container IDs, and durations describe a run; they are not reproducible inputs.
 
-### Review evidence
+## Evidence and observability
 
 Every lifecycle command receives a sortable command ID. SQLite stores its sanitized arguments, status, exit code, timeline, and test observations. Content-hashed artifact files store input snapshots, build and test logs, patch checks, repository snapshots, solver output, provenance, and final JSON.
 
@@ -135,7 +137,7 @@ Every lifecycle command receives a sortable command ID. SQLite stores its saniti
 
 `.taskbundle/reports/latest.html` opens the newest report, and `.taskbundle/reports/index.html` lists the full history. Reports and ZIP exports can contain hidden-test names, logs, diffs, source excerpts, and model output, so they must remain on the trusted reviewer side.
 
-## CLI behavior and errors
+## UX and error model
 
 The main commands are `new`, `init`, `validate`, `run`, `report`, and `doctor`.
 
@@ -146,9 +148,9 @@ The main commands are `new`, `init`, `validate`, `run`, `report`, and `doctor`.
 
 Arguments are sanitized before storage. Credentials and secret-like values are redacted. The OpenRouter key is read from the host environment or `.env`, used only for the API request, and never persisted or exposed to solver tools.
 
-## Performance and deliberate limits
+## Performance tradeoffs
 
-Correctness currently takes priority over speed. Attempts run sequentially, every repetition gets a fresh container and volume, validation runs both baseline and golden phases, and solver runs repeat the baseline. Authors can iterate faster with static validation, cached images, or fewer repetitions. Bounded parallel attempts are the clearest future optimization, provided each attempt keeps isolated state, deterministic ordering, and complete evidence.
+Evaluation runs sequentially and reuses the immutable evaluator image. The default path creates one container per phase/repetition, runs all selected tests there, and uses one repetition; this minimizes container churn for RL rollouts. Baseline and golden/post-solver remain separate, and solver runs still repeat the baseline before spending solver resources. Authors can opt into repeated sampling and `test-attempt` isolation for stronger flake and state-leak detection. Bounded parallel repetitions are a possible future optimization, provided evidence ordering and resource limits remain deterministic.
 
 The implementation deliberately does not include:
 

@@ -17,7 +17,7 @@ from taskbundle.lifecycle.initialize import (
     solver_secrecy_contract_sha256,
 )
 from taskbundle.lifecycle.validate import snapshot_bundle_inputs, validate_task
-from taskbundle.models import BuildMetadata
+from taskbundle.models import BuildMetadata, EvaluatorIsolation
 from taskbundle.process import ProcessResult
 from taskbundle.session import CommandSession
 
@@ -197,21 +197,48 @@ def test_validate_records_full_baseline_and_golden_matrix(valid_bundle_path: Pat
         session.close()
 
     assert result["valid"] is True
-    assert result["attempt_count"] == 12
-    assert len(rows) == 12
+    assert result["attempt_count"] == 4
+    assert result["evaluator_isolation"] == "phase"
+    assert len(rows) == 4
     assert result["mismatches"] == []
     assert result["flaky"] == []
-    assert len([call for call in runner.calls if call[1] == "create"]) == 12
-    assert len([call for call in runner.calls if call[1] == "rm"]) == 12
-    assert len([artifact for artifact in artifacts if artifact["kind"] == "patch_log"]) == 36
+    assert len([call for call in runner.calls if call[1] == "create"]) == 2
+    assert len([call for call in runner.calls if call[1] == "rm"]) == 2
+    assert len([artifact for artifact in artifacts if artifact["kind"] == "patch_log"]) == 6
     assert (
-        len([artifact for artifact in artifacts if artifact["kind"] == "repository_snapshot"]) == 12
+        len([artifact for artifact in artifacts if artifact["kind"] == "repository_snapshot"]) == 2
     )
     assert (
         len([artifact for artifact in artifacts if artifact["kind"] == "execution_provenance"]) == 1
     )
-    assert len(result["snapshot_artifacts"]) == 12
+    assert len(result["snapshot_artifacts"]) == 2
     assert all((bundle.root / ".taskbundle" / row["log_artifact"]).is_file() for row in rows)
+
+
+def test_validate_test_attempt_isolation_preserves_fresh_container_per_attempt(
+    valid_bundle_path: Path,
+) -> None:
+    bundle = load_bundle(valid_bundle_path)
+    write_initialized_metadata(bundle)
+    runner = ValidationRunner(base_commit=bundle.manifest.repository.commit)
+    session = start_validation_session(bundle)
+    try:
+        result = validate_task(
+            bundle=bundle,
+            session=session,
+            runner=runner,
+            repetitions=2,
+            evaluator_isolation=EvaluatorIsolation.TEST_ATTEMPT,
+        )
+    finally:
+        session.close()
+
+    assert result["valid"] is True
+    assert result["attempt_count"] == 8
+    assert result["evaluator_isolation"] == "test-attempt"
+    assert len([call for call in runner.calls if call[1] == "create"]) == 8
+    assert len([call for call in runner.calls if call[1] == "rm"]) == 8
+    assert len(result["snapshot_artifacts"]) == 8
 
 
 def test_validate_rejects_inconsistent_repeated_outcomes(valid_bundle_path: Path) -> None:
@@ -221,7 +248,7 @@ def test_validate_rejects_inconsistent_repeated_outcomes(valid_bundle_path: Path
     session = start_validation_session(bundle)
     try:
         with pytest.raises(InvalidTaskError) as caught:
-            validate_task(bundle=bundle, session=session, runner=runner)
+            validate_task(bundle=bundle, session=session, runner=runner, repetitions=3)
         session.fail(caught.value)
         rows = session.database.get_test_results(session.command_id)
     finally:
@@ -230,7 +257,7 @@ def test_validate_rejects_inconsistent_repeated_outcomes(valid_bundle_path: Path
     assert len(rows) == 12
     assert caught.value.details["valid"] is False
     assert caught.value.details["flaky"][0]["test_id"] == "add-remains-available"
-    assert len([call for call in runner.calls if call[1] == "rm"]) == 12
+    assert len([call for call in runner.calls if call[1] == "rm"]) == 6
 
 
 def test_patch_preflight_failure_still_removes_evaluator(valid_bundle_path: Path) -> None:
@@ -268,9 +295,7 @@ def test_validate_rejects_a_dirty_initialized_repository(valid_bundle_path: Path
 
     assert caught.value.details["dirty"] is True
     assert caught.value.details["status"] == [" M calculator.py"]
-    assert caught.value.details["snapshot_artifact"].endswith(
-        "baseline-pass_to_pass-add-remains-available-1-pristine.json"
-    )
+    assert caught.value.details["snapshot_artifact"].endswith("baseline-attempt-1-pristine.json")
     assert [call for call in runner.calls if call[1] == "rm"] == [
         ("docker", "rm", "--force", "--volumes", "baseline-container")
     ]

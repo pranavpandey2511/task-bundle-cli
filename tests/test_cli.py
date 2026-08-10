@@ -61,6 +61,10 @@ def test_new_scaffolds_valid_bundle_and_is_logged(tmp_path: Path) -> None:
     assert manifest["schema_version"] == 3
     assert manifest["candidate"]["allowed_patch_paths"] == ["src"]
     assert manifest["candidate"]["disallowed_patch_paths"] == []
+    assert manifest["validation"] == {
+        "repetitions": 1,
+        "evaluator_isolation": "phase",
+    }
     assert "/usr/local/bin/python -I -m pytest" in manifest["tests"]["fail_to_pass"][0]["command"]
 
 
@@ -104,6 +108,16 @@ def test_primary_help_hides_compatibility_commands() -> None:
         assert re.search(rf"│\s+{command}\s+", result.output)
     for legacy in ("check", "history", "logs", "diagnose", "artifacts", "export"):
         assert re.search(rf"│\s+{legacy}\s+", result.output) is None
+
+
+@pytest.mark.parametrize("command", ["validate", "run"])
+def test_evaluator_isolation_override_is_documented_in_help(command: str) -> None:
+    result = runner.invoke(app, [command, "--help"])
+
+    assert result.exit_code == 0, result.output
+    assert "--evaluator-isolation" in result.output
+    assert "phase" in result.output
+    assert "test-attempt" in result.output
 
 
 def test_sigterm_uses_the_normal_interrupt_cleanup_path() -> None:

@@ -178,7 +178,10 @@ def scaffold_bundle(
                     "allowed_patch_paths": ["src"],
                     "disallowed_patch_paths": [],
                 },
-                "validation": {"repetitions": 3},
+                "validation": {
+                    "repetitions": 1,
+                    "evaluator_isolation": "phase",
+                },
                 "runtime": {
                     "cpus": 2,
                     "memory": "4g",
