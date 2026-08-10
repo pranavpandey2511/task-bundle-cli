@@ -1,6 +1,6 @@
 # Task Bundle CLI
 
-Task Bundle CLI is a local judge for coding tasks. It pins one repository revision, proves the task's baseline and reference-solution behavior, runs a solver without exposing evaluator tests, grades only the captured candidate patch, and records reviewable evidence.
+Task Bundle CLI is a local judge for coding tasks. It pins one repository revision, proves the task's baseline and reference-solution behavior, runs a solver without exposing evaluator tests, grades only the captured candidate patch, and records reviewable JSON and HTML evidence.
 
 This repository contains:
 
@@ -16,7 +16,7 @@ Requirements:
 - Python 3.12 or newer;
 - [uv](https://docs.astral.sh/uv/);
 - Git;
-- a running Docker daemon.
+- the Docker CLI and a running Docker-compatible daemon.
 
 ```bash
 uv sync --frozen
@@ -24,6 +24,33 @@ uv run task doctor .
 ```
 
 The examples below use `uv run task` so they work directly from this checkout. An installed package exposes the same CLI as `task`.
+
+## Set up Docker first
+
+Task Bundle CLI uses the local Docker CLI to build images and start isolated containers. Installing only the `docker` command is not enough: it must be able to reach a running daemon. Check that before running the lifecycle:
+
+```bash
+docker version
+docker run --rm hello-world
+uv run task doctor .
+```
+
+### macOS: Colima
+
+[Colima](https://github.com/abiosoft/colima) is a lightweight Docker runtime for macOS. With Homebrew, install both the runtime and Docker client, then start the runtime:
+
+```bash
+brew install colima docker
+colima start
+docker run --rm hello-world
+uv run task doctor .
+```
+
+Colima normally configures the Docker client when it starts. If `docker version` cannot reach the daemon, inspect `docker context ls`, make sure the Colima context is selected, and rerun `colima start` before retrying `task doctor`.
+
+### Docker Desktop or other platforms
+
+[Docker Desktop](https://docs.docker.com/desktop/) is a supported alternative on macOS, Windows, and Linux: install it, start it, then run the same three checks above. On a Linux host, install [Docker Engine](https://docs.docker.com/engine/install/) for the distribution and ensure the current user can access the daemon. The CLI only requires a Docker-compatible local engine; it does not require Docker Desktop specifically.
 
 ## Run the included bundle end to end
 
@@ -52,6 +79,8 @@ uv run task report --bundle examples/swe-bench-pro-ansible --events
 uv run task report --bundle examples/swe-bench-pro-ansible \
   --export /tmp/ansible-task-evidence.zip
 ```
+
+Each lifecycle summary prints the exact generated HTML path. Open `.taskbundle/reports/latest.html` for the newest review or `.taskbundle/reports/index.html` to browse all immutable command reports.
 
 With the bundle's three configured repetitions, validation records 30 attempts: five tests across baseline and golden phases, repeated three times. The positive-control run records 30 more attempts across baseline and post-solver phases. The expected compact result is:
 
@@ -90,7 +119,7 @@ Only configured assertion-failure exit codes count as a legitimate `fail` observ
 | `task init` | Materialize the pinned commit and build verified evaluator and solver images. |
 | `task validate` | Run static author checks or prove baseline/golden behavior. |
 | `task run` | Execute a solver, capture its patch, enforce path policy, and grade it. |
-| `task report` | Select, diagnose, integrity-check, list, or export lifecycle evidence. |
+| `task report` | Select, diagnose, integrity-check, show HTML review paths, or export evidence. |
 | `task doctor` | Check Python, Git, the Docker CLI, and the Docker daemon. |
 
 Run `uv run task COMMAND --help` for all options. The primary workflow is:
@@ -224,7 +253,15 @@ If `task.json` becomes malformed after a run, `task report --bundle BUNDLE` can 
 
 SQLite stores commands, events, individual attempts, and artifact metadata. Artifacts carry size and SHA-256 records. `task report` verifies every artifact before presenting it; `--export` refuses tampered evidence and produces a byte-stable ZIP for the selected recorded command. The export and HTML review contain trusted evaluator material and must not be exposed to a solver before grading.
 
-Lifecycle HTML reports are static reviewer views derived from the ledger. They show outcome, expected-versus-observed attempts, diagnosis, bounded log excerpts, candidate changes, reproducibility context, factual events, and links to exact evidence. No web service or second execution path is involved.
+### Review the HTML reports
+
+Lifecycle HTML reports are static reviewer views derived from the ledger. They show the outcome, expected-versus-observed attempts, diagnosis, bounded log excerpts, candidate changes, reproducibility context, factual events, and links to exact evidence. Reports are created for successful and failed `new`, `init`, `validate`, and `run` commands.
+
+- `.taskbundle/commands/<command-id>/report.html` is the immutable report for one command;
+- `.taskbundle/reports/latest.html` points to the newest report;
+- `.taskbundle/reports/index.html` lists all report versions newest first.
+
+The HTML is self-contained and needs no application server. It never reruns tests or solver code; it renders escaped data already stored in SQLite and artifact files. Reports may include hidden-test information, solver output, and candidate diffs, so review them locally and do not expose them to a solver or publish them without redaction.
 
 ## Isolation summary
 
