@@ -9,6 +9,10 @@ This repository contains:
 - checked-in pass/fail summaries in each bundle's `evaluation.json`;
 - architecture, decisions, tradeoffs, and known limits in `DESIGN.md`.
 
+## Design decisions
+
+The project's architecture and design decisions are documented in [DESIGN.md](DESIGN.md). Start with its ["Decisions at a glance"](DESIGN.md#decisions-at-a-glance) section for a concise overview, then use the linked sections for the rationale, tradeoffs, and limits behind each choice.
+
 ## Install
 
 Requirements:
