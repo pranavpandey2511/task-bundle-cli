@@ -95,6 +95,14 @@ def test_submission_docs_cover_usage_and_tradeoffs() -> None:
     ):
         assert command in readme
     assert "evaluation.json" in readme
+    for screenshot in (
+        "docs/report-screenshots/resolved-run-overview.png",
+        "docs/report-screenshots/problem-statement.png",
+        "docs/report-screenshots/diagnosis-and-tests.png",
+        "docs/report-screenshots/artifact-inventory.png",
+    ):
+        assert screenshot in readme
+        assert (PROJECT_ROOT / screenshot).is_file()
     for decision in (
         "## Lifecycle and correctness",
         "## Test secrecy and trust boundary",

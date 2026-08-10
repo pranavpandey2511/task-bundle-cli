@@ -263,6 +263,36 @@ Lifecycle HTML reports are static reviewer views derived from the ledger. They s
 
 The HTML is self-contained and needs no application server. It never reruns tests or solver code; it renders escaped data already stored in SQLite and artifact files. Reports may include hidden-test information, solver output, and candidate diffs, so review them locally and do not expose them to a solver or publish them without redaction.
 
+### Example report screenshots
+
+These are real captures from the included Ansible run report. They show what a reviewer sees after opening the local HTML report.
+
+**Resolved run overview**
+
+The top of the report shows the final state, the number of matched expectations, the run duration, and the evidence count.
+
+![Resolved Ansible run overview](docs/report-screenshots/resolved-run-overview.png)
+
+**Problem statement**
+
+The problem section preserves the task description and implementation scope that the solver receives.
+
+![Ansible problem statement](docs/report-screenshots/problem-statement.png)
+
+**Diagnosis and test results**
+
+The diagnosis explains whether evidence is trustworthy and gives a direct next action. The test table records each observed outcome and links to its log.
+
+![Diagnosis and test results](docs/report-screenshots/diagnosis-and-tests.png)
+
+**Artifact inventory**
+
+The artifact table makes recorded inputs, patches, logs, provenance, and repository snapshots inspectable by size and SHA-256.
+
+![Artifact inventory](docs/report-screenshots/artifact-inventory.png)
+
+These screenshots are reviewer-side evidence for this fixed example. Do not publish equivalent captures for a task while its evaluator tests or evidence must remain private from a solver.
+
 ## Isolation summary
 
 Solver and evaluator containers have no host bind mount or Docker socket. Runtime containers use a disposable workspace volume, read-only root filesystem, size-bounded tmpfs, CPU/memory/PID limits, dropped capabilities, `no-new-privileges`, a forced shell entrypoint, explicit timeouts, and no network. Solver state is destroyed before its patch is graded in fresh evaluators.
