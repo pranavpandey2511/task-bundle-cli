@@ -69,3 +69,30 @@ def test_command_ledger_round_trip(tmp_path: Path) -> None:
 
     with Database(database_path) as reopened:
         assert reopened.get_command("command-1") is not None
+
+
+def test_latest_command_can_skip_query_commands(tmp_path: Path) -> None:
+    database_path = tmp_path / "state" / "taskbundle.db"
+    now = datetime.now(UTC).isoformat()
+
+    with Database(database_path) as database:
+        for command_id, command_name in (
+            ("command-1", "run"),
+            ("command-2", "diagnose"),
+            ("command-3", "artifacts"),
+        ):
+            database.create_command(
+                command_id=command_id,
+                command_name=command_name,
+                bundle_id="fixture",
+                arguments=[command_name],
+                started_at=now,
+            )
+
+        latest = database.get_latest_command(
+            exclude_id="command-4",
+            exclude_names=("artifacts", "diagnose", "export", "history", "logs"),
+        )
+
+        assert latest is not None
+        assert latest["id"] == "command-1"

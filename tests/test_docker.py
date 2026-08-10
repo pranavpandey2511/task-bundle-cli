@@ -88,6 +88,9 @@ def test_smoke_container_is_isolated_and_removed_after_timeout() -> None:
     assert create[create.index("--tmpfs") + 1] == "/tmp:rw,nosuid,nodev,size=512m"
     assert "HOME=/tmp/taskbundle-home" in create
     assert "XDG_CACHE_HOME=/tmp/taskbundle-cache" in create
+    assert create[create.index("--env") + 1].startswith("HOME=")
+    assert any(argument.startswith("PATH=/usr/local/sbin:") for argument in create)
+    assert create[create.index("--entrypoint") + 1] == "/bin/sh"
     assert runner.calls[-1] == (
         "docker",
         "rm",
@@ -118,6 +121,7 @@ def test_container_inputs_are_streamed_without_docker_cp(tmp_path: Path) -> None
     assert command[:3] == ("docker", "exec", "--interactive")
     assert command[-1] == "/tmp/taskbundle-input.patch"
     assert "cp" not in command
+    assert any('exec /bin/cat > "$1"' in argument for argument in command)
 
 
 def test_solver_network_and_secret_forwarding_are_explicit() -> None:
@@ -153,3 +157,20 @@ def test_solver_network_and_secret_forwarding_are_explicit() -> None:
     assert execute[4:6] == ("--env", "OPENAI_API_KEY")
     assert "TASKBUNDLE_DESCRIPTION=/tmp/description.md" in execute
     assert all("secret-value" not in argument for argument in execute)
+
+
+def test_trusted_exec_path_overrides_candidate_controlled_path() -> None:
+    runner = SequenceRunner([result([], stdout="ok\n")])
+
+    DockerClient(runner).exec_command(
+        container_id="evaluator-123",
+        workdir="/workspace",
+        command=["git", "status"],
+        timeout_seconds=10,
+        environment_values={"PATH": "/workspace/bin"},
+        trusted_path="/usr/bin:/bin",
+    )
+
+    execute = runner.calls[0]
+    assert "PATH=/usr/bin:/bin" in execute
+    assert "PATH=/workspace/bin" not in execute

@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
-from taskbundle.errors import InfrastructureError
+from taskbundle.errors import InfrastructureError, InvalidTaskError
 from taskbundle.process import ProcessResult, Runner
 
 
@@ -46,6 +47,7 @@ class GitClient:
                 commit,
             ],
             ["git", "-C", str(destination), "checkout", "--quiet", "--detach", "FETCH_HEAD"],
+            ["git", "-C", str(destination), "submodule", "update", "--init", "--recursive"],
         )
         logs: list[str] = []
         for command in commands:
@@ -83,7 +85,165 @@ class GitClient:
                 "The generated source checkout is unexpectedly dirty.",
                 details={"status": status.stdout.strip()},
             )
+
+        submodules = self.runner.run(
+            ["git", "-C", str(destination), "submodule", "status", "--recursive"],
+            timeout_seconds=timeout_seconds,
+            environment=environment,
+        )
+        logs.append(self._format_result(submodules))
+        self._require_success(submodules, action="verify Git submodules")
+        invalid_submodules = [
+            line for line in submodules.stdout.splitlines() if line.startswith(("-", "+", "U"))
+        ]
+        if invalid_submodules:
+            raise InfrastructureError(
+                "One or more Git submodules are not at their pinned commits.",
+                details={"submodules": invalid_submodules},
+            )
         return CheckoutResult(commit=actual, log="\n".join(logs))
+
+    def check_patch(
+        self,
+        *,
+        repository: Path,
+        patch: Path,
+        label: str,
+        timeout_seconds: int = 60,
+    ) -> str:
+        if patch.stat().st_size == 0:
+            return f"{label}: empty patch\n"
+        result = self.runner.run(
+            ["git", "-C", str(repository), "apply", "--check", str(patch)],
+            timeout_seconds=timeout_seconds,
+            environment={"GIT_TERMINAL_PROMPT": "0"},
+        )
+        if not result.succeeded:
+            raise InvalidTaskError(
+                f"The {label} does not apply to the configured repository commit.",
+                hint="Regenerate the trusted patch against repository.commit.",
+                details={
+                    "exit_code": result.exit_code,
+                    "timed_out": result.timed_out,
+                    "stdout": result.stdout[-4000:],
+                    "stderr": result.stderr[-4000:],
+                },
+            )
+        return self._format_result(result)
+
+    def sanitize_solver_source(
+        self,
+        *,
+        repository: Path,
+        patch: Path,
+        protected_paths: set[str],
+        timeout_seconds: int = 120,
+    ) -> tuple[str, str]:
+        """Create a deterministic, remote-free Git root from the redacted source tree."""
+
+        environment = {
+            "GIT_TERMINAL_PROMPT": "0",
+            "GIT_AUTHOR_NAME": "Task Bundle",
+            "GIT_AUTHOR_EMAIL": "taskbundle@example.invalid",
+            "GIT_AUTHOR_DATE": "2000-01-01T00:00:00Z",
+            "GIT_COMMITTER_NAME": "Task Bundle",
+            "GIT_COMMITTER_EMAIL": "taskbundle@example.invalid",
+            "GIT_COMMITTER_DATE": "2000-01-01T00:00:00Z",
+        }
+        logs: list[str] = []
+        if patch.stat().st_size:
+            applied = self.runner.run(
+                ["git", "-C", str(repository), "apply", str(patch)],
+                timeout_seconds=timeout_seconds,
+                environment=environment,
+            )
+            logs.append(self._format_result(applied))
+            self._require_success(applied, action="apply the solver-view redaction patch")
+
+        remaining = sorted(
+            path
+            for path in protected_paths
+            if (repository / Path(path)).exists() or (repository / Path(path)).is_symlink()
+        )
+        if remaining:
+            raise InvalidTaskError(
+                "The sanitized solver source still contains evaluator-owned test paths.",
+                hint=(
+                    "Make solver-view.patch delete every protected file completely; tests that "
+                    "are injected only may already be absent."
+                ),
+                details={"remaining_protected_paths": remaining},
+            )
+
+        git_metadata = sorted(
+            repository.rglob(".git"),
+            key=lambda candidate: len(candidate.parts),
+            reverse=True,
+        )
+        root_git = repository / ".git"
+        if root_git.exists() and root_git not in git_metadata:
+            git_metadata.append(root_git)
+        for metadata in git_metadata:
+            if metadata.is_dir() and not metadata.is_symlink():
+                shutil.rmtree(metadata)
+            else:
+                metadata.unlink(missing_ok=True)
+
+        commands = (
+            ["git", "-C", str(repository), "init", "--quiet"],
+            ["git", "-C", str(repository), "add", "--force", "-A"],
+            [
+                "git",
+                "-C",
+                str(repository),
+                "commit",
+                "--quiet",
+                "-m",
+                "taskbundle sanitized solver baseline",
+            ],
+        )
+        for command in commands:
+            result = self.runner.run(
+                command,
+                timeout_seconds=timeout_seconds,
+                environment=environment,
+            )
+            logs.append(self._format_result(result))
+            self._require_success(result, action="create the sanitized solver Git root")
+
+        nested_metadata = sorted(
+            path.relative_to(repository).as_posix()
+            for path in repository.rglob(".git")
+            if path != repository / ".git"
+        )
+        if nested_metadata:
+            raise InvalidTaskError(
+                "Nested Git metadata remains in the sanitized solver source.",
+                details={"paths": nested_metadata},
+            )
+
+        revision = self.runner.run(
+            ["git", "-C", str(repository), "rev-parse", "HEAD"],
+            timeout_seconds=30,
+            environment=environment,
+        )
+        logs.append(self._format_result(revision))
+        self._require_success(revision, action="identify the sanitized solver baseline")
+        commit = revision.stdout.strip().lower()
+
+        status = self.runner.run(
+            ["git", "-C", str(repository), "status", "--porcelain"],
+            timeout_seconds=30,
+            environment=environment,
+        )
+        logs.append(self._format_result(status))
+        self._require_success(status, action="verify the sanitized solver source")
+        if status.stdout.strip():
+            raise InvalidTaskError(
+                "The sanitized solver source is unexpectedly dirty.",
+                details={"status": status.stdout.splitlines()},
+            )
+        return commit, "\n".join(logs)
 
     def version(self) -> str:
         result = self.runner.run(["git", "--version"], timeout_seconds=10)

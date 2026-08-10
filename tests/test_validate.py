@@ -10,13 +10,34 @@ import pytest
 
 from taskbundle.config import Bundle, load_bundle
 from taskbundle.errors import InvalidTaskError
-from taskbundle.lifecycle.initialize import build_fingerprint, image_tag, sha256_file
-from taskbundle.lifecycle.validate import validate_task
+from taskbundle.lifecycle.initialize import (
+    build_fingerprint,
+    image_tag,
+    sha256_file,
+    solver_secrecy_contract_sha256,
+)
+from taskbundle.lifecycle.validate import snapshot_bundle_inputs, validate_task
 from taskbundle.models import BuildMetadata
 from taskbundle.process import ProcessResult
 from taskbundle.session import CommandSession
 
 IMAGE_ID = "sha256:" + "b" * 64
+
+
+def test_trusted_manifest_snapshot_is_the_exact_source_that_was_parsed(
+    valid_bundle_path: Path,
+) -> None:
+    bundle = load_bundle(valid_bundle_path)
+    parsed_source = bundle.manifest_source
+    bundle.manifest_path.write_text('{"changed": true}\n', encoding="utf-8")
+    session = CommandSession.start(command_name="validate", bundle_path=valid_bundle_path)
+    try:
+        inputs = snapshot_bundle_inputs(bundle=bundle, session=session)
+    finally:
+        session.close()
+
+    artifact = valid_bundle_path / ".taskbundle" / inputs.artifacts["task.json"]
+    assert artifact.read_text(encoding="utf-8") == parsed_source
 
 
 def process_result(
@@ -45,11 +66,13 @@ class ValidationRunner:
         flaky: bool = False,
         patch_failure: bool = False,
         dirty_pristine: bool = False,
+        invalid_failure_exit: bool = False,
     ) -> None:
         self.base_commit = base_commit
         self.flaky = flaky
         self.patch_failure = patch_failure
         self.dirty_pristine = dirty_pristine
+        self.invalid_failure_exit = invalid_failure_exit
         self.calls: list[tuple[str, ...]] = []
         self.container_phases: dict[str, str] = {}
         self.test_attempts: defaultdict[tuple[str, str], int] = defaultdict(int)
@@ -83,9 +106,12 @@ class ValidationRunner:
         if argv[1] != "exec":
             raise AssertionError(f"Unexpected Docker command: {command}")
 
-        container_id = argv[4]
+        position = 2
+        while argv[position] in {"--workdir", "--env"}:
+            position += 2
+        container_id = argv[position]
         phase = self.container_phases[container_id]
-        inner = list(argv[5:])
+        inner = list(argv[position + 1 :])
         if inner[:3] == ["git", "rev-parse", "HEAD"]:
             return process_result(argv, stdout=f"{self.base_commit}\n")
         if inner[:2] == ["git", "status"]:
@@ -99,13 +125,18 @@ class ValidationRunner:
             return process_result(argv)
         if inner[:2] == ["git", "apply"]:
             return process_result(argv)
+        if inner[:1] == ["/bin/rm"]:
+            return process_result(argv)
+        if inner and inner[0] == "grep":
+            return process_result(argv)
 
         test_command = inner[-1]
-        test_name = "add" if "add_remains_available" in test_command else "subtract"
+        test_name = "add" if "test_add" in test_command else "subtract"
         key = (phase, test_name)
         self.test_attempts[key] += 1
         if phase == "baseline" and test_name == "subtract":
-            return process_result(argv, exit_code=1, stderr="expected failure\n")
+            exit_code = 127 if self.invalid_failure_exit else 1
+            return process_result(argv, exit_code=exit_code, stderr="expected failure\n")
         if (
             self.flaky
             and phase == "baseline"
@@ -124,8 +155,13 @@ def write_initialized_metadata(bundle: Bundle) -> None:
         repository_url=bundle.manifest.repository.url,
         repository_commit=bundle.manifest.repository.commit,
         dockerfile_sha256=sha256_file(bundle.dockerfile_path),
+        solver_view_sha256=sha256_file(bundle.solver_view_patch_path),
+        secrecy_contract_sha256=solver_secrecy_contract_sha256(bundle),
         image_tag=image_tag(bundle.manifest.id, fingerprint),
         image_id=IMAGE_ID,
+        solver_image_tag=f"taskbundle/{bundle.manifest.id}-solver:{fingerprint[:16]}",
+        solver_image_id=IMAGE_ID,
+        solver_base_commit="e" * 40,
         git_version="git version test",
         docker_client_version="test",
         docker_server_version="test",
@@ -163,16 +199,16 @@ def test_validate_records_full_baseline_and_golden_matrix(valid_bundle_path: Pat
     assert len(rows) == 12
     assert result["mismatches"] == []
     assert result["flaky"] == []
-    assert len([call for call in runner.calls if call[1] == "create"]) == 2
-    assert len([call for call in runner.calls if call[1] == "rm"]) == 2
-    assert len([artifact for artifact in artifacts if artifact["kind"] == "patch_log"]) == 6
+    assert len([call for call in runner.calls if call[1] == "create"]) == 12
+    assert len([call for call in runner.calls if call[1] == "rm"]) == 12
+    assert len([artifact for artifact in artifacts if artifact["kind"] == "patch_log"]) == 36
     assert (
-        len([artifact for artifact in artifacts if artifact["kind"] == "repository_snapshot"]) == 7
+        len([artifact for artifact in artifacts if artifact["kind"] == "repository_snapshot"]) == 12
     )
     assert (
         len([artifact for artifact in artifacts if artifact["kind"] == "execution_provenance"]) == 1
     )
-    assert len(result["snapshot_artifacts"]) == 7
+    assert len(result["snapshot_artifacts"]) == 12
     assert all((bundle.root / ".taskbundle" / row["log_artifact"]).is_file() for row in rows)
 
 
@@ -192,7 +228,7 @@ def test_validate_rejects_inconsistent_repeated_outcomes(valid_bundle_path: Path
     assert len(rows) == 12
     assert caught.value.details["valid"] is False
     assert caught.value.details["flaky"][0]["test_id"] == "add-remains-available"
-    assert len([call for call in runner.calls if call[1] == "rm"]) == 2
+    assert len([call for call in runner.calls if call[1] == "rm"]) == 12
 
 
 def test_patch_preflight_failure_still_removes_evaluator(valid_bundle_path: Path) -> None:
@@ -230,7 +266,32 @@ def test_validate_rejects_a_dirty_initialized_repository(valid_bundle_path: Path
 
     assert caught.value.details["dirty"] is True
     assert caught.value.details["status"] == [" M calculator.py"]
-    assert caught.value.details["snapshot_artifact"].endswith("baseline-pristine.json")
+    assert caught.value.details["snapshot_artifact"].endswith(
+        "baseline-pass_to_pass-add-remains-available-1-pristine.json"
+    )
     assert [call for call in runner.calls if call[1] == "rm"] == [
         ("docker", "rm", "--force", "--volumes", "baseline-container")
     ]
+
+
+def test_validate_does_not_accept_a_missing_test_command_as_fail_to_pass(
+    valid_bundle_path: Path,
+) -> None:
+    bundle = load_bundle(valid_bundle_path)
+    write_initialized_metadata(bundle)
+    runner = ValidationRunner(
+        base_commit=bundle.manifest.repository.commit,
+        invalid_failure_exit=True,
+    )
+    session = start_validation_session(bundle)
+    try:
+        with pytest.raises(InvalidTaskError, match="valid pass/fail") as caught:
+            validate_task(bundle=bundle, session=session, runner=runner, repetitions=1)
+        session.fail(caught.value)
+        rows = session.database.get_test_results(session.command_id)
+    finally:
+        session.close()
+
+    error = next(row for row in rows if row["observed"] == "error")
+    assert error["test_id"] == "subtracts"
+    assert error["exit_code"] == 127

@@ -1,4 +1,4 @@
-"""Run an existing coding-agent command inside the solver container."""
+"""Run an existing offline coding-agent command inside the sanitized solver container."""
 
 from __future__ import annotations
 

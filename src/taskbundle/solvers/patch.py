@@ -2,32 +2,36 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from taskbundle.solvers.base import SolverContext, SolverOutcome
 
 
 class PatchSolver:
     name = "patch"
 
-    def __init__(self, patch_path: Path) -> None:
-        self.patch_path = patch_path
+    def __init__(self, patch_content: str) -> None:
+        self.patch_content = patch_content
 
     def solve(self, context: SolverContext) -> SolverOutcome:
         destination = "/tmp/taskbundle-input.patch"
-        context.docker.stream_file(
-            source=self.patch_path,
+        context.docker.stream_text(
+            content=self.patch_content,
             container_id=context.container_id,
             destination=destination,
         )
+        check = context.docker.exec_command(
+            container_id=context.container_id,
+            workdir=context.workdir,
+            command=["git", "apply", "--check", "--index", destination],
+            timeout_seconds=context.timeout_seconds,
+            trusted_path=context.trusted_path,
+        )
+        if not check.succeeded:
+            return SolverOutcome(adapter=self.name, process=check)
         process = context.docker.exec_command(
             container_id=context.container_id,
             workdir=context.workdir,
-            command=[
-                "/bin/sh",
-                "-lc",
-                f"git apply --check {destination} && git apply {destination}",
-            ],
+            command=["git", "apply", "--index", destination],
             timeout_seconds=context.timeout_seconds,
+            trusted_path=context.trusted_path,
         )
         return SolverOutcome(adapter=self.name, process=process)

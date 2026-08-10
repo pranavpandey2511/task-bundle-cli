@@ -142,16 +142,3 @@ class SolverError(TaskBundleError):
             hint=hint,
             details=details,
         )
-
-
-class NotImplementedLifecycleError(TaskBundleError):
-    def __init__(self, command: str) -> None:
-        super().__init__(
-            f"`task {command}` is not implemented in the current milestone.",
-            kind=ErrorKind.INFRASTRUCTURE,
-            exit_code=ExitCode.INFRASTRUCTURE,
-            hint=(
-                "The bundle contract and command ledger are implemented first; "
-                "see the README build plan."
-            ),
-        )

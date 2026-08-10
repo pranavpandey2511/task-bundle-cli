@@ -1,0 +1,13 @@
+diff --git a/test_bucket.py b/test_bucket.py
+deleted file mode 100644
+--- a/test_bucket.py
++++ /dev/null
+@@ -1,8 +0,0 @@
+-import unittest
+-
+-from calculator import add
+-
+-
+-class BucketTests(unittest.TestCase):
+-    def test_add_remains_available(self) -> None:
+-        self.assertEqual(add(10, 7), 17)

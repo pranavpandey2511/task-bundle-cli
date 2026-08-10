@@ -45,12 +45,14 @@ def test_task_init_builds_smokes_reuses_and_cleans_up(valid_bundle_path: Path) -
         first_report = json.loads(first.stdout)
         assert first_report["data"]["reused"] is False
         assert first_report["data"]["smoke"]["exit_code"] == 0
+        assert first_report["data"]["solver_image_id"] != first_report["data"]["image_id"]
 
         second = runner.invoke(app, ["init", str(bundle), "--json"])
         assert second.exit_code == 0, second.output
         second_report = json.loads(second.stdout)
         assert second_report["data"]["reused"] is True
         assert second_report["data"]["image_id"] == first_report["data"]["image_id"]
+        assert second_report["data"]["solver_image_id"] == first_report["data"]["solver_image_id"]
 
         validation = runner.invoke(app, ["validate", str(bundle), "--json"])
         assert validation.exit_code == 0, validation.output
@@ -71,8 +73,21 @@ def test_task_init_builds_smokes_reuses_and_cleans_up(valid_bundle_path: Path) -
         assert stub_report["error"]["details"]["solver"]["patch_bytes"] == 0
 
         solver_script = (
-            "if grep -R --exclude-dir=.git theta-hidden-evaluator-only "
-            "/workspace /tmp/taskbundle-description.md; then exit 91; fi; "
+            "if grep -R theta-hidden-evaluator-only /workspace /tmp; then exit 91; fi; "
+            "if grep -R -F 'self.assertEqual(add(10, 7), 17)' /workspace /tmp; "
+            "then exit 92; fi; "
+            "if grep -R -F 'self.assertEqual(subtract(10, 7), 3)' /workspace /tmp; "
+            "then exit 93; fi; "
+            "if git grep -Fq -- 'self.assertEqual(add(10, 7), 17)' "
+            "$(git rev-list --all) -- .; then exit 98; fi; "
+            "if git grep -Fq -- 'self.assertEqual(subtract(10, 7), 3)' "
+            "$(git rev-list --all) -- .; then exit 99; fi; "
+            "if test -e /tmp/taskbundle-tests.patch "
+            "-o -e /tmp/taskbundle-gold.patch "
+            "-o -e /tmp/taskbundle-solver-view.patch; then exit 94; fi; "
+            'if test -n "$(git remote)"; then exit 95; fi; '
+            "grep -q 'def test_add' test_public.py || exit 96; "
+            "PYTHONDONTWRITEBYTECODE=1 python -m unittest -q test_public.py || exit 97; "
             "sed -i '/def subtract/,/return left + right/"
             "s/return left + right/return left - right/' calculator.py; "
             "printf 'captured\\n' > solver-note.txt"
@@ -100,7 +115,7 @@ def test_task_init_builds_smokes_reuses_and_cleans_up(valid_bundle_path: Path) -
             for artifact in command_report["data"]["snapshot_artifacts"]
             if artifact.endswith("-pristine.json")
         ]
-        assert len(pristine_snapshots) == 3
+        assert len(pristine_snapshots) == 5
         for snapshot_path in pristine_snapshots:
             snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
             assert snapshot["head_matches_base"] is True
@@ -110,6 +125,37 @@ def test_task_init_builds_smokes_reuses_and_cleans_up(valid_bundle_path: Path) -
         ).read_text(encoding="utf-8")
         assert "solver-note.txt" in command_patch
         assert "theta-hidden-evaluator-only" not in command_patch
+
+        shadow_patch = bundle / "runner-shadow.patch"
+        shadow_patch.write_text(
+            (bundle / "gold.patch").read_text(encoding="utf-8")
+            + """diff --git a/unittest.py b/unittest.py
+new file mode 100644
+--- /dev/null
++++ b/unittest.py
+@@ -0,0 +1 @@
++# candidate-controlled runner shadow
+""",
+            encoding="utf-8",
+        )
+        shadow_run = runner.invoke(
+            app,
+            [
+                "run",
+                str(bundle),
+                "--solver",
+                "patch",
+                "--candidate-patch",
+                str(shadow_patch),
+                "--repetitions",
+                "1",
+                "--json",
+            ],
+        )
+        assert shadow_run.exit_code == 4, shadow_run.output
+        shadow_report = json.loads(shadow_run.stdout)
+        assert shadow_report["error"]["kind"] == "solver_error"
+        assert shadow_report["error"]["details"]["outside_allowed_paths"] == ["unittest.py"]
 
         patch_run = runner.invoke(
             app,

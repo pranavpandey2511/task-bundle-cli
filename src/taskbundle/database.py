@@ -244,6 +244,28 @@ class Database:
         ).fetchall()
         return [self._row_to_dict(row) for row in rows]
 
+    def get_latest_command(
+        self,
+        *,
+        exclude_id: str | None = None,
+        exclude_names: Sequence[str] = (),
+    ) -> dict[str, Any] | None:
+        clauses: list[str] = []
+        parameters: list[Any] = []
+        if exclude_id is not None:
+            clauses.append("id != ?")
+            parameters.append(exclude_id)
+        if exclude_names:
+            placeholders = ", ".join("?" for _name in exclude_names)
+            clauses.append(f"command_name NOT IN ({placeholders})")
+            parameters.extend(exclude_names)
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        row = self._connection.execute(
+            f"SELECT * FROM commands{where} ORDER BY started_at DESC, id DESC LIMIT 1",
+            parameters,
+        ).fetchone()
+        return self._row_to_dict(row) if row else None
+
     def get_events(self, command_id: str) -> list[dict[str, Any]]:
         rows = self._connection.execute(
             "SELECT * FROM events WHERE command_id = ? ORDER BY id", (command_id,)

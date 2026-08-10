@@ -30,7 +30,7 @@ def test_fixture_expresses_baseline_and_golden_truth_tables(
             "-m",
             "unittest",
             "-q",
-            "test_hidden.HiddenTests.test_add_remains_available",
+            "test_bucket.BucketTests.test_add_remains_available",
             cwd=baseline,
         ).returncode
         == 0
@@ -50,8 +50,25 @@ def test_fixture_expresses_baseline_and_golden_truth_tables(
     golden = clone(repository, tmp_path / "golden")
     assert run("git", "apply", str(fixture_assets / "gold.patch"), cwd=golden).returncode == 0
     assert run("git", "apply", str(fixture_assets / "hidden.patch"), cwd=golden).returncode == 0
-    result = run("python3", "-m", "unittest", "-q", "test_hidden", cwd=golden)
+    result = run(
+        "python3",
+        "-m",
+        "unittest",
+        "-q",
+        "test_bucket",
+        "test_hidden",
+        cwd=golden,
+    )
     assert result.returncode == 0, result.stderr
+
+    solver = clone(repository, tmp_path / "solver")
+    assert (
+        run("git", "apply", str(fixture_assets / "solver-view.patch"), cwd=solver).returncode == 0
+    )
+    assert not (solver / "test_bucket.py").exists()
+    assert (solver / "test_public.py").is_file()
+    public = run("python3", "-m", "unittest", "-q", "test_public", cwd=solver)
+    assert public.returncode == 0, public.stderr
 
     assert "theta-hidden-evaluator-only" not in "".join(
         path.read_text(encoding="utf-8")
@@ -61,3 +78,4 @@ def test_fixture_expresses_baseline_and_golden_truth_tables(
 
     shutil.rmtree(baseline)
     shutil.rmtree(golden)
+    shutil.rmtree(solver)

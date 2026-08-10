@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import sys
 from collections.abc import Callable
@@ -13,16 +14,21 @@ from typing import Any
 import typer
 from rich.console import Console
 from rich.table import Table
+from rich.text import Text
 
 from taskbundle import __version__
 from taskbundle.artifacts import verify_artifact_records
+from taskbundle.authoring import check_bundle
 from taskbundle.config import Bundle, load_bundle
+from taskbundle.diagnostics import diagnose_command
 from taskbundle.errors import (
+    ConfigurationError,
     ErrorKind,
     ExitCode,
     InvalidTaskError,
     TaskBundleError,
 )
+from taskbundle.evidence import export_command_evidence
 from taskbundle.lifecycle.initialize import initialize_task
 from taskbundle.lifecycle.run import run_task
 from taskbundle.lifecycle.validate import validate_task
@@ -40,6 +46,8 @@ app = typer.Typer(
 console = Console(stderr=True)
 
 Operation = Callable[[CommandSession], dict[str, Any]]
+INSPECTION_COMMANDS = ("artifacts", "diagnose", "export", "history", "logs", "report")
+REPORT_LIFECYCLE_COMMANDS = ("new", "init", "validate", "run")
 
 
 def _version_callback(value: bool) -> None:
@@ -71,12 +79,43 @@ def _render_success(report: CommandReport) -> None:
     data = report.data
     if report.command == "new":
         console.print(f"Bundle: {data['bundle']}")
-        console.print("Next: edit the generated placeholders, then run [bold]task init[/bold].")
+        profile = data.get("profile", {})
+        if profile:
+            console.print(
+                f"Starter profile: [bold]{profile.get('selected', 'unknown')}[/bold] "
+                f"({profile.get('source', 'configured')})"
+            )
+        readiness = data.get("readiness", {})
+        for item in readiness.get("todo", []):
+            console.print(f"[yellow]TODO[/yellow] {item}")
+        console.print(
+            "Next: define evaluator tests and candidate paths, edit the generated placeholders, "
+            "then run [bold]task validate --static[/bold]."
+        )
     elif report.command == "init":
         reuse = "reused" if data["reused"] else "built"
-        console.print(f"Image: [bold]{data['image_tag']}[/bold] ({reuse})")
-        console.print(f"Image ID: {data['image_id']}")
+        console.print(f"Evaluator image: [bold]{data['image_tag']}[/bold] ({reuse})")
+        console.print(f"Evaluator image ID: {data['image_id']}")
+        console.print(f"Solver image: [bold]{data['solver_image_tag']}[/bold] ({reuse})")
+        console.print(f"Solver image ID: {data['solver_image_id']}")
         console.print(f"Smoke command passed in {data['smoke']['duration_seconds']:.3f}s")
+    elif report.command == "validate" and data.get("mode") == "static":
+        table = Table("Check", "Status", "Detail")
+        for check in data["checks"]:
+            status = (
+                "[yellow]warning[/yellow]"
+                if check["status"] == "warning"
+                else "[green]pass[/green]"
+            )
+            detail = check["detail"]
+            if check.get("recommendation"):
+                detail = f"{detail}\nNext: {check['recommendation']}"
+            table.add_row(check["name"], status, detail)
+        console.print(table)
+        console.print(
+            f"Static bundle contract passed with {data['warning_count']} warning(s); "
+            "Docker was not used."
+        )
     elif report.command == "validate":
         table = Table("Phase", "Suite", "Test", "Expected", "Observed", "Stable")
         for phase, suites in data["phases"].items():
@@ -109,6 +148,23 @@ def _render_success(report: CommandReport) -> None:
                     "yes" if test["stable"] else "no",
                 )
         console.print(table)
+    elif report.command == "check":
+        table = Table("Check", "Status", "Detail")
+        for check in data["checks"]:
+            status = (
+                "[yellow]warning[/yellow]"
+                if check["status"] == "warning"
+                else "[green]pass[/green]"
+            )
+            detail = check["detail"]
+            if check.get("recommendation"):
+                detail = f"{detail}\nNext: {check['recommendation']}"
+            table.add_row(check["name"], status, detail)
+        console.print(table)
+        console.print(
+            f"Static bundle contract passed with {data['warning_count']} warning(s); "
+            "Docker was not used."
+        )
     elif report.command == "history":
         table = Table("Command ID", "Command", "Status", "Started", "Exit")
         for command in data["commands"]:
@@ -157,6 +213,34 @@ def _render_success(report: CommandReport) -> None:
                     str(artifact["size_bytes"]),
                 )
             console.print(table)
+    elif report.command == "diagnose":
+        summary = data["summary"]
+        console.print(
+            f"Target: [bold]{data['command']['id']}[/bold] "
+            f"{data['command']['command_name']} ({summary['status']})"
+        )
+        console.print(
+            f"Evidence: [bold]{summary['artifact_integrity']}[/bold]; "
+            f"unexpected attempts: {summary['failing_attempts']}; "
+            f"flaky tests: {summary['flaky_tests']}; snapshots: {summary['snapshot_count']}"
+        )
+        table = Table("Severity", "Category", "Finding")
+        for finding in data["findings"]:
+            table.add_row(finding["severity"], finding["category"], finding["message"])
+        console.print(table)
+        if data["next_actions"]:
+            console.print("[bold]Next actions[/bold]")
+            for index, action in enumerate(data["next_actions"], start=1):
+                console.print(f"{index}. {action}")
+    elif report.command == "export":
+        console.print(f"Evidence archive: [bold]{data['output']}[/bold]")
+        console.print(
+            f"SHA-256: {data['sha256']} ({data['size_bytes']} bytes, {data['entry_count']} entries)"
+        )
+        console.print(
+            "[yellow]Contains evaluator material and solver logs; do not expose it to a solver "
+            "before grading.[/yellow]"
+        )
     elif report.command == "artifacts":
         table = Table()
         table.add_column("Kind")
@@ -181,6 +265,59 @@ def _render_success(report: CommandReport) -> None:
             status = "[green]ok[/green]" if check["ok"] else "[red]failed[/red]"
             table.add_row(check["name"], status, check["detail"])
         console.print(table)
+    elif report.command == "report":
+        mode = data.get("mode")
+        if mode == "list":
+            table = Table("Command ID", "Command", "Status", "Started", "Exit")
+            for command in data["commands"]:
+                table.add_row(
+                    command["id"],
+                    command["command_name"],
+                    command["status"],
+                    command["started_at"],
+                    "" if command["exit_code"] is None else str(command["exit_code"]),
+                )
+            console.print(table)
+        elif mode == "export":
+            console.print(f"Evidence archive: [bold]{data['output']}[/bold]")
+            console.print(
+                f"SHA-256: {data['sha256']} "
+                f"({data['size_bytes']} bytes, {data['entry_count']} entries)"
+            )
+            console.print(
+                "[yellow]Contains evaluator material and solver logs; do not expose it to a "
+                "solver before grading.[/yellow]"
+            )
+        else:
+            summary = data["summary"]
+            console.print(
+                f"Target: [bold]{data['command']['id']}[/bold] "
+                f"{data['command']['command_name']} ({summary['status']})"
+            )
+            console.print(
+                f"Evidence: [bold]{summary['artifact_integrity']}[/bold]; "
+                f"unexpected attempts: {summary['failing_attempts']}; "
+                f"flaky tests: {summary['flaky_tests']}"
+            )
+            if data.get("html_report"):
+                console.print(f"HTML review: [bold cyan]{data['html_report']}[/bold cyan]")
+            if data.get("report_index"):
+                console.print(f"All versions: [cyan]{data['report_index']}[/cyan]")
+            findings = Table("Severity", "Category", "Finding")
+            for finding in data["findings"]:
+                findings.add_row(finding["severity"], finding["category"], finding["message"])
+            console.print(findings)
+            if data["next_actions"]:
+                console.print("[bold]Next actions[/bold]")
+                for index, action in enumerate(data["next_actions"], start=1):
+                    console.print(f"{index}. {action}")
+            if data.get("events"):
+                console.print("[bold]Lifecycle events[/bold]")
+                for event in data["events"]:
+                    console.print(
+                        f"{event['occurred_at']} [{event['level']}] "
+                        f"{event['phase']}: {event['message']}"
+                    )
 
 
 def _render_failure(report: CommandReport) -> None:
@@ -191,6 +328,230 @@ def _render_failure(report: CommandReport) -> None:
         console.print(f"Hint: {report.error.hint}")
     if report.error.details:
         console.print_json(data=report.error.details)
+
+
+def _shell_command(*parts: str | Path) -> str:
+    return shlex.join(str(part) for part in parts)
+
+
+def _target_id_from_report(report: CommandReport) -> str:
+    targets: list[object] = [report.data.get("command")]
+    commands = report.data.get("commands")
+    if isinstance(commands, list) and commands:
+        targets.append(commands[0])
+    if report.error is not None:
+        targets.append(report.error.details.get("command"))
+    for target in targets:
+        if isinstance(target, dict):
+            target_id = target.get("id")
+            if isinstance(target_id, str):
+                return target_id
+    return report.command_id
+
+
+def _quantity(count: int, singular: str, plural: str | None = None) -> str:
+    return f"{count} {singular if count == 1 else plural or singular + 's'}"
+
+
+def _result_summary(report: CommandReport) -> str:
+    if report.error is not None:
+        return report.error.message
+    data = report.data
+    if report.command == "new":
+        profile = data.get("profile", {}).get("selected", "custom")
+        todo_count = len(data.get("readiness", {}).get("todo", []))
+        return (
+            f"Created {_quantity(len(data.get('created_files', [])), 'bundle file')} "
+            f"with the {profile} starter and {_quantity(todo_count, 'authoring TODO')}."
+        )
+    if report.command == "check":
+        return f"Static contract passed with {data.get('warning_count', 0)} warning(s)."
+    if report.command == "init":
+        action = "Reused" if data.get("reused") else "Built"
+        return f"{action} evaluator and solver images; the smoke command passed."
+    if report.command == "validate":
+        if data.get("mode") == "static":
+            return f"Static contract passed with {data.get('warning_count', 0)} warning(s)."
+        attempts = int(data.get("attempt_count", 0))
+        flaky = len(data.get("flaky", []))
+        return (
+            f"Truth table passed across {_quantity(attempts, 'test attempt')} with "
+            f"{_quantity(flaky, 'flaky test')}."
+        )
+    if report.command == "run":
+        solver = data.get("solver", {})
+        return (
+            f"Solver resolved={'yes' if data.get('resolved') else 'no'}; "
+            f"captured {solver.get('patch_bytes', 0)} patch bytes."
+        )
+    if report.command == "history":
+        return f"Listed {_quantity(int(data.get('count', 0)), 'recorded command')}."
+    if report.command == "logs":
+        event_count = len(data.get("events", []))
+        test_count = len(data.get("test_results", []))
+        artifact_count = len(data.get("artifacts", []))
+        return (
+            f"Loaded {_quantity(event_count, 'event')}, "
+            f"{_quantity(test_count, 'test attempt')}, and "
+            f"{_quantity(artifact_count, 'artifact')}."
+        )
+    if report.command == "diagnose":
+        summary = data.get("summary", {})
+        failing = int(summary.get("failing_attempts", 0))
+        flaky = int(summary.get("flaky_tests", 0))
+        return (
+            f"Found {_quantity(failing, 'unexpected attempt')}, "
+            f"{_quantity(flaky, 'flaky test')}, and "
+            f"artifact integrity={summary.get('artifact_integrity', 'unknown')}."
+        )
+    if report.command == "artifacts":
+        return f"Verified {_quantity(int(data.get('count', 0)), 'artifact')}."
+    if report.command == "export":
+        entries = int(data.get("entry_count", 0))
+        quantity = _quantity(entries, "evidence entry", "evidence entries")
+        return f"Wrote {quantity} to {data.get('output')}."
+    if report.command == "doctor":
+        checks = data.get("checks", [])
+        return f"Passed {sum(bool(check.get('ok')) for check in checks)}/{len(checks)} checks."
+    if report.command == "report":
+        mode = data.get("mode")
+        if mode == "list":
+            return f"Listed {_quantity(int(data.get('count', 0)), 'lifecycle report')}."
+        if mode == "export":
+            return f"Wrote verified evidence to {data.get('output')}."
+        summary = data.get("summary", {})
+        return (
+            f"Diagnosed {data.get('command', {}).get('id', 'the selected command')}; "
+            f"artifact integrity={summary.get('artifact_integrity', 'unknown')}."
+        )
+    return f"{report.command} completed successfully."
+
+
+def _next_commands(report: CommandReport, bundle_root: Path) -> list[str]:
+    bundle = str(bundle_root)
+    target_id = _target_id_from_report(report)
+
+    def lifecycle(command: str, *arguments: str) -> str:
+        return _shell_command("task", command, bundle, *arguments)
+
+    def inspect(command: str, *, exact: bool = False) -> str:
+        parts: list[str | Path] = ["task", command]
+        if exact:
+            parts.append(target_id)
+        parts.extend(["--bundle", bundle])
+        return _shell_command(*parts)
+
+    if report.error is not None:
+        commands = [
+            inspect("report", exact=True),
+            _shell_command("task", "report", target_id, "--bundle", bundle, "--events"),
+        ]
+        if report.error.kind in {ErrorKind.CONFIGURATION.value, ErrorKind.NOT_FOUND.value}:
+            commands.append(_shell_command("task", report.command, "--help"))
+        elif report.error.kind == ErrorKind.INVALID_TASK.value:
+            commands.append(lifecycle("validate", "--static"))
+        elif report.error.kind in {
+            ErrorKind.INFRASTRUCTURE.value,
+            ErrorKind.INTERNAL.value,
+        }:
+            commands.append(_shell_command("task", "doctor", bundle))
+        elif report.error.kind in {ErrorKind.SOLVER.value, ErrorKind.UNRESOLVED.value}:
+            commands.append(
+                lifecycle("run", "--solver", "patch", "--candidate-patch", "candidate.patch")
+            )
+        return commands
+    if report.command == "new":
+        return [lifecycle("validate", "--static"), lifecycle("init")]
+    if report.command == "check":
+        return [lifecycle("init"), inspect("report", exact=True)]
+    if report.command == "init":
+        return [lifecycle("validate"), inspect("report")]
+    if report.command == "validate":
+        if report.data.get("mode") == "static":
+            return [lifecycle("init"), lifecycle("validate"), inspect("report", exact=True)]
+        return [
+            lifecycle("run", "--solver", "patch", "--candidate-patch", "candidate.patch"),
+            lifecycle("run", "--solver", "command", "--solver-cmd", "<offline solver command>"),
+            inspect("report"),
+        ]
+    if report.command == "run":
+        return [inspect("report"), _shell_command("task", "report", "--bundle", bundle, "--list")]
+    if report.command == "history":
+        if not report.data.get("commands"):
+            if (bundle_root / "task.json").is_file():
+                return [lifecycle("check")]
+            return [_shell_command("task", "new", "--help")]
+        return [inspect("logs"), inspect("diagnose")]
+    if report.command == "logs":
+        return [
+            inspect("diagnose", exact=True),
+            inspect("artifacts", exact=True),
+            inspect("export", exact=True),
+        ]
+    if report.command == "diagnose":
+        return [
+            inspect("logs", exact=True),
+            inspect("artifacts", exact=True),
+            inspect("export", exact=True),
+        ]
+    if report.command == "artifacts":
+        return [inspect("diagnose", exact=True), inspect("export", exact=True)]
+    if report.command == "export":
+        return [
+            _shell_command("unzip", "-l", str(report.data.get("output", "evidence.zip"))),
+            inspect("diagnose", exact=True),
+        ]
+    if report.command == "doctor":
+        if (bundle_root / "task.json").is_file():
+            return [lifecycle("check")]
+        return [_shell_command("task", "new", "--help")]
+    if report.command == "report":
+        if report.data.get("mode") == "list":
+            commands = report.data.get("commands", [])
+            if commands:
+                return [inspect("report", exact=True)]
+            return [lifecycle("validate", "--static")]
+        if report.data.get("mode") == "export":
+            return [_shell_command("unzip", "-l", str(report.data.get("output", "evidence.zip")))]
+        return [
+            _shell_command("task", "report", target_id, "--bundle", bundle, "--events"),
+            _shell_command("task", "report", "--bundle", bundle, "--list"),
+        ]
+    return [inspect("logs", exact=True)]
+
+
+def _render_guidance(report: CommandReport, bundle_root: Path) -> None:
+    target_id = _target_id_from_report(report)
+    status = "[green]succeeded[/green]" if report.error is None else "[red]failed[/red]"
+    console.rule("[bold]Summary & next steps[/bold]")
+    console.print(f"Status: {status}  Command: [bold]{report.command}[/bold]")
+    console.print(Text.assemble("Bundle: ", (str(bundle_root), "bold")), soft_wrap=True)
+    console.print(f"Command ID: [bold]{report.command_id}[/bold]")
+    if target_id != report.command_id:
+        console.print(f"Target command ID: [bold]{target_id}[/bold]")
+    console.print(Text.assemble("Result: ", _result_summary(report)))
+    if report.html_report is not None:
+        console.print(
+            Text.assemble(
+                "HTML review: ",
+                (str(bundle_root / ".taskbundle" / report.html_report), "bold cyan"),
+            ),
+            soft_wrap=True,
+        )
+        console.print(
+            Text.assemble(
+                "All versions: ",
+                (str(bundle_root / ".taskbundle" / str(report.report_index)), "cyan"),
+            ),
+            soft_wrap=True,
+        )
+    console.print("[bold]Next commands (copy and paste)[/bold]")
+    for command in _next_commands(report, bundle_root):
+        console.print(Text(f"  $ {command}", style="cyan"), soft_wrap=True)
+    console.print(
+        "Tip: inside the bundle directory, `task report` needs no ID or --bundle; "
+        "it selects the latest non-inspection lifecycle command."
+    )
 
 
 def _execute(
@@ -226,8 +587,10 @@ def _execute(
             _emit_json(report)
         elif report.status.value == "succeeded":
             _render_success(report)
+            _render_guidance(report, session.state_dir.parent)
         else:
             _render_failure(report)
+            _render_guidance(report, session.state_dir.parent)
     finally:
         session.close()
 
@@ -256,9 +619,14 @@ def new_command(
     repo: str = typer.Option(..., "--repo", help="Git repository URL or local path."),
     commit: str = typer.Option(..., "--commit", help="Exact 40-character Git commit."),
     bundle_id: str = typer.Option(..., "--id", help="Stable lowercase bundle identifier."),
+    profile: str = typer.Option(
+        "auto",
+        "--profile",
+        help="Starter profile: auto, python, node, go, rust, or custom.",
+    ),
     json_output: bool = typer.Option(False, "--json", help="Emit structured JSON."),
 ) -> None:
-    """Scaffold an editable task bundle."""
+    """Create a profile-aware task draft, readiness checklist, and HTML authoring report."""
 
     try:
         bundle.expanduser().resolve().mkdir(parents=True, exist_ok=True)
@@ -271,15 +639,32 @@ def new_command(
         bundle_path=bundle,
         json_output=json_output,
         operation=lambda session: _new_operation(
-            session, bundle=bundle, repo=repo, commit=commit, bundle_id=bundle_id
+            session,
+            bundle=bundle,
+            repo=repo,
+            commit=commit,
+            bundle_id=bundle_id,
+            profile=profile,
         ),
     )
 
 
 def _new_operation(
-    session: CommandSession, *, bundle: Path, repo: str, commit: str, bundle_id: str
+    session: CommandSession,
+    *,
+    bundle: Path,
+    repo: str,
+    commit: str,
+    bundle_id: str,
+    profile: str,
 ) -> dict[str, Any]:
-    data = scaffold_bundle(root=bundle, repo=repo, commit=commit, bundle_id=bundle_id)
+    data = scaffold_bundle(
+        root=bundle,
+        repo=repo,
+        commit=commit,
+        bundle_id=bundle_id,
+        profile=profile,
+    )
     session.attach_bundle(data["bundle_id"])
     session.event("info", "scaffold", "Bundle scaffold created.", {"files": data["created_files"]})
     return data
@@ -292,17 +677,111 @@ def _load_for_lifecycle(session: CommandSession, bundle_path: Path) -> Bundle:
     return bundle
 
 
+def _target_command(session: CommandSession, command_id: str | None) -> dict[str, Any]:
+    requested_id = command_id or "latest"
+    target = (
+        session.database.get_latest_command(
+            exclude_id=session.command_id,
+            exclude_names=INSPECTION_COMMANDS,
+        )
+        if requested_id == "latest"
+        else session.database.get_command(requested_id)
+    )
+    if target is None:
+        if requested_id == "latest":
+            message = "No prior non-inspection command was found."
+            hint = "Run `task new`, `task init`, `task validate`, or `task run` first."
+        else:
+            message = f"Command ID was not found: {requested_id}"
+            hint = "Run `task report --list` to list available lifecycle command IDs."
+        raise TaskBundleError(
+            message,
+            kind=ErrorKind.NOT_FOUND,
+            exit_code=ExitCode.CONFIGURATION,
+            hint=hint,
+        )
+    bundle_id = target.get("bundle_id")
+    if isinstance(bundle_id, str):
+        session.attach_bundle(bundle_id)
+    session.event(
+        "info",
+        "query",
+        "Target command selected.",
+        {"requested": requested_id, "target_command_id": target["id"]},
+    )
+    return target
+
+
+def _target_report_command(session: CommandSession, command_id: str | None) -> dict[str, Any]:
+    if command_id is not None:
+        target = _target_command(session, command_id)
+        if target["command_name"] not in REPORT_LIFECYCLE_COMMANDS:
+            raise ConfigurationError(
+                f"Command is not a lifecycle report: {command_id}",
+                hint="Run `task report --list` to select a new, init, validate, or run command.",
+            )
+        return target
+
+    selected: dict[str, Any] | None = next(
+        (
+            command
+            for command in session.database.list_commands(limit=500)
+            if command["id"] != session.command_id
+            and command["command_name"] in REPORT_LIFECYCLE_COMMANDS
+        ),
+        None,
+    )
+    if selected is None:
+        raise TaskBundleError(
+            "No prior lifecycle report was found.",
+            kind=ErrorKind.NOT_FOUND,
+            exit_code=ExitCode.CONFIGURATION,
+            hint="Run `task new`, `task init`, `task validate`, or `task run` first.",
+        )
+    bundle_id = selected.get("bundle_id")
+    if isinstance(bundle_id, str):
+        session.attach_bundle(bundle_id)
+    session.event(
+        "info",
+        "query",
+        "Lifecycle report selected.",
+        {"requested": "latest", "target_command_id": selected["id"]},
+    )
+    return selected
+
+
+@app.command("check", hidden=True)
+def check_command(
+    bundle: Path = typer.Argument(Path("."), help="Task bundle directory."),
+    json_output: bool = typer.Option(False, "--json", help="Emit structured JSON."),
+) -> None:
+    """Run fast language-neutral contract checks without Docker."""
+
+    def operation(session: CommandSession) -> dict[str, Any]:
+        loaded = _load_for_lifecycle(session, bundle)
+        result = check_bundle(loaded)
+        session.event(
+            "info",
+            "check",
+            "Static authoring checks completed without Docker.",
+            {"warning_count": result["warning_count"]},
+        )
+        return result
+
+    _execute(command_name="check", bundle_path=bundle, json_output=json_output, operation=operation)
+
+
 @app.command("init")
 def init_command(
     bundle: Path = typer.Argument(Path("."), help="Task bundle directory."),
     force_rebuild: bool = typer.Option(
         False,
         "--force-rebuild",
-        help="Ignore matching build metadata and rebuild the image.",
+        help="Ignore matching metadata and rebuild evaluator and solver images without cache.",
     ),
     json_output: bool = typer.Option(False, "--json", help="Emit structured JSON."),
 ) -> None:
-    """Materialize the exact repository and build its base image."""
+    """Materialize the exact repository and build evaluator and redacted solver images."""
 
     def operation(session: CommandSession) -> dict[str, Any]:
         loaded = _load_for_lifecycle(session, bundle)
@@ -314,6 +793,11 @@ def init_command(
 @app.command("validate")
 def validate_command(
     bundle: Path = typer.Argument(Path("."), help="Task bundle directory."),
+    static: bool = typer.Option(
+        False,
+        "--static",
+        help="Run only fast authoring and portability checks without Docker.",
+    ),
     repetitions: int | None = typer.Option(
         None,
         "--repetitions",
@@ -323,10 +807,19 @@ def validate_command(
     ),
     json_output: bool = typer.Option(False, "--json", help="Emit structured JSON."),
 ) -> None:
-    """Validate baseline and golden test expectations."""
+    """Verify baseline and golden truth tables before running a solver."""
 
     def operation(session: CommandSession) -> dict[str, Any]:
         loaded = _load_for_lifecycle(session, bundle)
+        if static:
+            result = {"mode": "static", **check_bundle(loaded)}
+            session.event(
+                "info",
+                "check",
+                "Static authoring checks completed without Docker.",
+                {"warning_count": result["warning_count"]},
+            )
+            return result
         return validate_task(bundle=loaded, session=session, repetitions=repetitions)
 
     _execute(
@@ -339,20 +832,24 @@ def run_command(
     bundle: Path = typer.Argument(Path("."), help="Task bundle directory."),
     solver: str = typer.Option("stub", "--solver", help="Solver adapter: stub, patch, or command."),
     solver_command: str | None = typer.Option(
-        None, "--solver-cmd", help="Command used by the command solver."
+        None,
+        "--solver-cmd",
+        help="Offline command executed inside the sanitized solver container.",
     ),
     candidate_patch: Path | None = typer.Option(
-        None, "--candidate-patch", help="Patch file used by the patch solver."
+        None,
+        "--candidate-patch",
+        help="Existing patch to apply in the sanitized solver and grade in fresh evaluators.",
     ),
     allow_network: bool = typer.Option(
         False,
         "--allow-network",
-        help="Permit solver network only when task.json also opts in.",
+        help="Reserved compatibility flag; strict test secrecy always rejects networking.",
     ),
     secret_environment_names: list[str] | None = typer.Option(
         None,
         "--secret-env",
-        help="Environment-variable name to forward to the solver; repeat as needed.",
+        help="Environment-variable name to forward to the offline solver; repeat as needed.",
     ),
     repetitions: int | None = typer.Option(
         None,
@@ -363,7 +860,7 @@ def run_command(
     ),
     json_output: bool = typer.Option(False, "--json", help="Emit structured JSON."),
 ) -> None:
-    """Run a solver and grade its captured patch."""
+    """Run a sanitized solver, enforce its patch policy, and grade in fresh evaluators."""
 
     def operation(session: CommandSession) -> dict[str, Any]:
         loaded = _load_for_lifecycle(session, bundle)
@@ -381,7 +878,135 @@ def run_command(
     _execute(command_name="run", bundle_path=bundle, json_output=json_output, operation=operation)
 
 
-@app.command("history")
+@app.command("report")
+def report_command(
+    command_id: str | None = typer.Argument(
+        None,
+        help="Lifecycle command ID; defaults to the latest new/init/validate/run report.",
+    ),
+    bundle: Path = typer.Option(Path("."), "--bundle", help="Task bundle directory."),
+    list_results: bool = typer.Option(
+        False,
+        "--list",
+        help="List lifecycle report versions instead of opening one report.",
+    ),
+    limit: int = typer.Option(20, "--limit", min=1, max=500, help="Maximum reports to list."),
+    include_events: bool = typer.Option(
+        False,
+        "--events",
+        help="Include the factual lifecycle event timeline in terminal and JSON output.",
+    ),
+    export_output: Path | None = typer.Option(
+        None,
+        "--export",
+        help="Write a verified deterministic evidence ZIP to this path.",
+    ),
+    force: bool = typer.Option(False, "--force", help="Replace an existing export ZIP."),
+    json_output: bool = typer.Option(False, "--json", help="Emit structured JSON."),
+) -> None:
+    """Understand, list, verify, inspect, or export lifecycle results and HTML reviews."""
+
+    def operation(session: CommandSession) -> dict[str, Any]:
+        if list_results:
+            if command_id is not None or include_events or export_output is not None or force:
+                raise ConfigurationError(
+                    "--list cannot be combined with COMMAND_ID, --events, --export, or --force."
+                )
+            commands = [
+                command
+                for command in session.database.list_commands(limit=500)
+                if command["id"] != session.command_id
+                and command["command_name"] in REPORT_LIFECYCLE_COMMANDS
+            ][:limit]
+            if commands and isinstance(commands[0].get("bundle_id"), str):
+                session.attach_bundle(commands[0]["bundle_id"])
+            session.event("info", "query", "Lifecycle reports listed.", {"count": len(commands)})
+            return {"mode": "list", "commands": commands, "count": len(commands)}
+
+        if force and export_output is None:
+            raise ConfigurationError("--force is only valid together with --export.")
+        if include_events and export_output is not None:
+            raise ConfigurationError("--events and --export select different report output modes.")
+
+        target = _target_report_command(session, command_id)
+        target_id = str(target["id"])
+        events = session.database.get_events(target_id)
+        test_results = session.database.get_test_results(target_id)
+        artifact_records = session.database.get_artifacts(target_id)
+
+        if export_output is not None:
+            exported = export_command_evidence(
+                state_dir=session.state_dir,
+                destination=export_output,
+                command=target,
+                events=events,
+                test_results=test_results,
+                artifact_records=artifact_records,
+                force=force,
+            )
+            session.event(
+                "info",
+                "export",
+                "Verified lifecycle evidence exported from task report.",
+                {"target_command_id": target_id, "output": exported["output"]},
+            )
+            return {"mode": "export", **exported}
+
+        diagnosis = diagnose_command(
+            state_dir=session.state_dir,
+            command=target,
+            events=events,
+            test_results=test_results,
+            artifact_records=artifact_records,
+        )
+        html_record = next(
+            (record for record in artifact_records if record["kind"] == "html_report"),
+            None,
+        )
+        html_path = (
+            session.state_dir / str(html_record["relative_path"])
+            if html_record is not None
+            else None
+        )
+        report_index = session.state_dir / "reports" / "index.html"
+        data = {
+            "mode": "show",
+            **diagnosis,
+            "event_count": len(events),
+            "events": events if include_events else [],
+            "test_results": test_results,
+            "html_report": (
+                str(html_path) if html_path is not None and html_path.is_file() else None
+            ),
+            "report_index": str(report_index) if report_index.is_file() else None,
+        }
+        if diagnosis["summary"]["artifact_integrity"] != "verified":
+            raise InvalidTaskError(
+                f"One or more artifacts failed integrity verification for {target_id}.",
+                hint="Repair the missing or mismatched evidence before trusting this report.",
+                details=data,
+            )
+        session.event(
+            "info",
+            "query",
+            "Lifecycle report diagnosed and artifact integrity verified.",
+            {
+                "target_command_id": target_id,
+                "artifact_integrity": diagnosis["summary"]["artifact_integrity"],
+                "html_report": data["html_report"],
+            },
+        )
+        return data
+
+    _execute(
+        command_name="report",
+        bundle_path=bundle,
+        json_output=json_output,
+        operation=operation,
+    )
+
+
+@app.command("history", hidden=True)
 def history_command(
     bundle: Path = typer.Argument(Path("."), help="Task bundle directory."),
     limit: int = typer.Option(20, min=1, max=500, help="Maximum commands to return."),
@@ -390,13 +1015,13 @@ def history_command(
     """List recent command records for a bundle."""
 
     def operation(session: CommandSession) -> dict[str, Any]:
-        loaded = load_bundle(bundle, require_files=False)
-        session.attach_bundle(loaded.manifest.id)
         commands = [
             row
             for row in session.database.list_commands(limit=limit + 1)
             if row["id"] != session.command_id
         ][:limit]
+        if commands and isinstance(commands[0].get("bundle_id"), str):
+            session.attach_bundle(commands[0]["bundle_id"])
         session.event("info", "query", "Command history queried.", {"count": len(commands)})
         return {"commands": commands, "count": len(commands)}
 
@@ -405,59 +1030,146 @@ def history_command(
     )
 
 
-@app.command("logs")
+@app.command("logs", hidden=True)
 def logs_command(
-    command_id: str = typer.Argument(..., help="Command ID to inspect."),
+    command_id: str | None = typer.Argument(
+        None,
+        help="Command ID to inspect; defaults to the latest non-inspection command.",
+    ),
     bundle: Path = typer.Option(Path("."), "--bundle", help="Task bundle directory."),
     json_output: bool = typer.Option(False, "--json", help="Emit structured JSON."),
 ) -> None:
     """Show a command, its events, test results, and artifacts."""
 
     def operation(session: CommandSession) -> dict[str, Any]:
-        loaded = load_bundle(bundle, require_files=False)
-        session.attach_bundle(loaded.manifest.id)
-        target = session.database.get_command(command_id)
-        if target is None:
-            raise TaskBundleError(
-                f"Command ID was not found: {command_id}",
-                kind=ErrorKind.NOT_FOUND,
-                exit_code=ExitCode.CONFIGURATION,
-                hint="Run `task history` to list available command IDs.",
-            )
+        target = _target_command(session, command_id)
+        target_id = str(target["id"])
         data = {
             "command": target,
-            "events": session.database.get_events(command_id),
-            "test_results": session.database.get_test_results(command_id),
-            "artifacts": session.database.get_artifacts(command_id),
+            "events": session.database.get_events(target_id),
+            "test_results": session.database.get_test_results(target_id),
+            "artifacts": session.database.get_artifacts(target_id),
         }
-        session.event("info", "query", "Command logs queried.", {"target_command_id": command_id})
+        session.event("info", "query", "Command logs queried.", {"target_command_id": target_id})
         return data
 
     _execute(command_name="logs", bundle_path=bundle, json_output=json_output, operation=operation)
 
 
-@app.command("artifacts")
+@app.command("diagnose", hidden=True)
+def diagnose_command_cli(
+    command_id: str | None = typer.Argument(
+        None,
+        help="Command ID to diagnose; defaults to the latest non-inspection command.",
+    ),
+    bundle: Path = typer.Option(Path("."), "--bundle", help="Task bundle directory."),
+    json_output: bool = typer.Option(False, "--json", help="Emit structured JSON."),
+) -> None:
+    """Triage failures, test observations, snapshots, and evidence integrity."""
+
+    def operation(session: CommandSession) -> dict[str, Any]:
+        target = _target_command(session, command_id)
+        target_id = str(target["id"])
+        data = diagnose_command(
+            state_dir=session.state_dir,
+            command=target,
+            events=session.database.get_events(target_id),
+            test_results=session.database.get_test_results(target_id),
+            artifact_records=session.database.get_artifacts(target_id),
+        )
+        session.event(
+            "info",
+            "query",
+            "Command evidence diagnosed.",
+            {
+                "target_command_id": target_id,
+                "finding_count": len(data["findings"]),
+                "artifact_integrity": data["summary"]["artifact_integrity"],
+            },
+        )
+        return data
+
+    _execute(
+        command_name="diagnose",
+        bundle_path=bundle,
+        json_output=json_output,
+        operation=operation,
+    )
+
+
+@app.command("export", hidden=True)
+def export_command(
+    command_id: str | None = typer.Argument(
+        None,
+        help=(
+            "Command ID whose evidence should be exported; defaults to the latest "
+            "non-inspection command."
+        ),
+    ),
+    bundle: Path = typer.Option(Path("."), "--bundle", help="Task bundle directory."),
+    output: Path | None = typer.Option(
+        None,
+        "--output",
+        help="ZIP destination; defaults to .taskbundle/exports/<command-id>.zip.",
+    ),
+    force: bool = typer.Option(False, "--force", help="Replace an existing output file."),
+    json_output: bool = typer.Option(False, "--json", help="Emit structured JSON."),
+) -> None:
+    """Export a deterministic ZIP after verifying all recorded artifacts."""
+
+    def operation(session: CommandSession) -> dict[str, Any]:
+        target = _target_command(session, command_id)
+        target_id = str(target["id"])
+        destination = output or session.state_dir / "exports" / f"{target_id}.zip"
+        data = export_command_evidence(
+            state_dir=session.state_dir,
+            destination=destination,
+            command=target,
+            events=session.database.get_events(target_id),
+            test_results=session.database.get_test_results(target_id),
+            artifact_records=session.database.get_artifacts(target_id),
+            force=force,
+        )
+        session.event(
+            "info",
+            "export",
+            "Verified command evidence exported.",
+            {
+                "target_command_id": target_id,
+                "output": data["output"],
+                "sha256": data["sha256"],
+            },
+        )
+        return data
+
+    _execute(
+        command_name="export",
+        bundle_path=bundle,
+        json_output=json_output,
+        operation=operation,
+    )
+
+
+@app.command("artifacts", hidden=True)
 def artifacts_command(
-    command_id: str = typer.Argument(..., help="Command ID whose artifacts should be verified."),
+    command_id: str | None = typer.Argument(
+        None,
+        help=(
+            "Command ID whose artifacts should be verified; defaults to the latest "
+            "non-inspection command."
+        ),
+    ),
     bundle: Path = typer.Option(Path("."), "--bundle", help="Task bundle directory."),
     json_output: bool = typer.Option(False, "--json", help="Emit structured JSON."),
 ) -> None:
     """List and verify a command's artifact hashes and sizes."""
 
     def operation(session: CommandSession) -> dict[str, Any]:
-        loaded = load_bundle(bundle, require_files=False)
-        session.attach_bundle(loaded.manifest.id)
-        target = session.database.get_command(command_id)
-        if target is None:
-            raise TaskBundleError(
-                f"Command ID was not found: {command_id}",
-                kind=ErrorKind.NOT_FOUND,
-                exit_code=ExitCode.CONFIGURATION,
-                hint="Run `task history` to list available command IDs.",
-            )
+        target = _target_command(session, command_id)
+        target_id = str(target["id"])
         verification = verify_artifact_records(
             state_dir=session.state_dir,
-            records=session.database.get_artifacts(command_id),
+            records=session.database.get_artifacts(target_id),
         )
         data = {"command": target, **verification}
         session.event(
@@ -465,14 +1177,14 @@ def artifacts_command(
             "query",
             "Command artifacts verified.",
             {
-                "target_command_id": command_id,
+                "target_command_id": target_id,
                 "count": verification["count"],
                 "valid": verification["valid"],
             },
         )
         if not verification["valid"]:
             raise InvalidTaskError(
-                f"One or more artifacts failed integrity verification for {command_id}.",
+                f"One or more artifacts failed integrity verification for {target_id}.",
                 hint="Inspect missing, unsafe_path, or mismatch entries before trusting the run.",
                 details=data,
             )

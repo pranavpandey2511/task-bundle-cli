@@ -13,6 +13,13 @@ from taskbundle.database import Database
 from taskbundle.errors import ErrorKind, ExitCode, InfrastructureError, TaskBundleError
 from taskbundle.ids import new_command_id
 from taskbundle.models import CommandReport, CommandStatus, ErrorPayload
+from taskbundle.reporting import (
+    REPORT_INDEX_PATH,
+    REPORTABLE_COMMANDS,
+    command_html_report_path,
+    publish_report_index,
+    render_command_report_html,
+)
 
 SENSITIVE_ARGUMENT_NAMES = {
     "--api-key",
@@ -163,6 +170,11 @@ class CommandSession:
         if self._finished:
             raise InfrastructureError(f"Command session already finished: {self.command_id}")
         ended_at = utc_now()
+        html_report = (
+            command_html_report_path(self.command_id)
+            if self.command_name in REPORTABLE_COMMANDS
+            else None
+        )
         report = CommandReport(
             command_id=self.command_id,
             command=self.command_name,
@@ -172,13 +184,37 @@ class CommandSession:
             ended_at=ended_at,
             data=data,
             error=error,
+            html_report=html_report,
+            report_index=REPORT_INDEX_PATH if html_report is not None else None,
         )
+        html_content: str | None = None
+        if html_report is not None:
+            html_content = render_command_report_html(
+                state_dir=self.state_dir,
+                report=report,
+                exit_code=exit_code,
+                events=self.database.get_events(self.command_id),
+                test_results=self.database.get_test_results(self.command_id),
+                artifact_records=self.database.get_artifacts(self.command_id),
+            )
         self.artifacts.write_json(
             command_id=self.command_id,
             relative_path="report.json",
             payload=report.model_dump(mode="json"),
             kind="command_report",
         )
+        if html_content is not None:
+            self.artifacts.write_text(
+                command_id=self.command_id,
+                relative_path="report.html",
+                content=html_content,
+                kind="html_report",
+            )
+            publish_report_index(
+                state_dir=self.state_dir,
+                database=self.database,
+                current_report=report,
+            )
         self.database.finish_command(
             command_id=self.command_id,
             status=status,

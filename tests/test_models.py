@@ -18,6 +18,7 @@ def test_loads_valid_bundle(valid_bundle_path: Path) -> None:
     assert bundle.manifest.id == "minimal-python"
     assert bundle.manifest.repository.commit
     assert bundle.test_patch_path.name == "hidden.patch"
+    assert bundle.solver_view_patch_path.name == "solver-view.patch"
 
 
 def test_rejects_short_commit(valid_bundle_path: Path) -> None:
@@ -41,6 +42,55 @@ def test_rejects_manifest_path_traversal(valid_bundle_path: Path) -> None:
         load_bundle(valid_bundle_path)
 
 
+def test_rejects_reused_trusted_patch_paths(valid_bundle_path: Path) -> None:
+    payload = json.loads((valid_bundle_path / "task.json").read_text(encoding="utf-8"))
+    payload["patches"]["solver_view"] = payload["patches"]["tests"]
+
+    with pytest.raises(ValidationError, match="must reference distinct files"):
+        TaskManifest.model_validate(payload)
+
+
+def test_rejects_solver_network_access(valid_bundle_path: Path) -> None:
+    payload = json.loads((valid_bundle_path / "task.json").read_text(encoding="utf-8"))
+    payload["runtime"]["solver_network"] = True
+
+    with pytest.raises(ValidationError, match="Input should be False"):
+        TaskManifest.model_validate(payload)
+
+
+def test_additional_protected_paths_are_explicit_and_safe(valid_bundle_path: Path) -> None:
+    payload = json.loads((valid_bundle_path / "task.json").read_text(encoding="utf-8"))
+    payload["tests"]["additional_protected_paths"] = ["generated/evaluator-tests.bin"]
+
+    manifest = TaskManifest.model_validate(payload)
+
+    assert "generated/evaluator-tests.bin" in manifest.tests.evaluator_owned_paths
+    payload["tests"]["additional_protected_paths"] = ["../outside.bin"]
+    with pytest.raises(ValidationError, match="path relative to the bundle root"):
+        TaskManifest.model_validate(payload)
+
+
+def test_candidate_patch_paths_are_safe_and_disjoint_from_evaluator_files(
+    valid_bundle_path: Path,
+) -> None:
+    payload = json.loads((valid_bundle_path / "task.json").read_text(encoding="utf-8"))
+    payload["candidate"]["allowed_patch_paths"] = ["../outside.py"]
+    with pytest.raises(ValidationError, match="path relative to the bundle root"):
+        TaskManifest.model_validate(payload)
+
+    payload["candidate"]["allowed_patch_paths"] = ["test_hidden.py"]
+    with pytest.raises(ValidationError, match="disjoint from evaluator-owned paths"):
+        TaskManifest.model_validate(payload)
+
+
+def test_evaluator_path_cannot_include_the_writable_repository(valid_bundle_path: Path) -> None:
+    payload = json.loads((valid_bundle_path / "task.json").read_text(encoding="utf-8"))
+    payload["environment"]["evaluator_path"] = ["/workspace/bin", "/usr/bin"]
+
+    with pytest.raises(ValidationError, match="exclude the writable workdir"):
+        TaskManifest.model_validate(payload)
+
+
 def test_rejects_symlink_escape(valid_bundle_path: Path, tmp_path: Path) -> None:
     outside = tmp_path / "outside.patch"
     outside.write_text("", encoding="utf-8")
@@ -58,6 +108,26 @@ def test_rejects_duplicate_test_ids(valid_bundle_path: Path) -> None:
 
     with pytest.raises(ValidationError, match="test IDs must be unique"):
         TaskManifest.model_validate(payload)
+
+
+def test_rejects_duplicate_test_markers(valid_bundle_path: Path) -> None:
+    payload = json.loads((valid_bundle_path / "task.json").read_text(encoding="utf-8"))
+    payload["tests"]["fail_to_pass"][0]["marker"] = payload["tests"]["pass_to_pass"][0]["marker"]
+
+    with pytest.raises(ValidationError, match="test markers must be unique"):
+        TaskManifest.model_validate(payload)
+
+
+def test_relative_local_repository_is_resolved_from_bundle(
+    valid_bundle_path: Path,
+    minimal_repository: tuple[Path, str],
+) -> None:
+    repository, _ = minimal_repository
+    payload = json.loads((valid_bundle_path / "task.json").read_text(encoding="utf-8"))
+    payload["repository"]["url"] = "../repository"
+    (valid_bundle_path / "task.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    assert load_bundle(valid_bundle_path).manifest.repository.url == str(repository.resolve())
 
 
 def test_report_schema_forbids_unknown_fields() -> None:

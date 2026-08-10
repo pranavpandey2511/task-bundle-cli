@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 3,
   "id": "swebench-pro-ansible-12734fa2",
   "repository": {
     "url": "https://github.com/ansible/ansible.git",
@@ -8,43 +8,61 @@
   "environment": {
     "dockerfile": "environment/Dockerfile",
     "workdir": "/workspace",
-    "smoke_command": "python -m pytest -q test/units/parsing/yaml/test_dumper.py::TestAnsibleDumper::test_unicode",
+    "smoke_command": "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTEST_ADDOPTS= /usr/local/bin/python -I -m pytest -q -c /dev/null --noconftest test/units/parsing/yaml/test_dumper.py::TestAnsibleDumper::test_unicode",
     "build_timeout_seconds": 3600,
     "smoke_timeout_seconds": 300
   },
   "patches": {
     "gold": "gold.patch",
-    "tests": "tests/hidden.patch"
+    "tests": "tests/hidden.patch",
+    "solver_view": "tests/solver-view.patch"
   },
   "tests": {
     "pass_to_pass": [
       {
         "id": "vault-encrypted-unicode",
-        "command": "python -m pytest -q test/units/parsing/yaml/test_dumper.py::TestAnsibleDumper::test_ansible_vault_encrypted_unicode",
+        "command": "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTEST_ADDOPTS= /usr/local/bin/python -I -m pytest -q -c /dev/null --noconftest test/units/parsing/yaml/test_dumper.py::TestAnsibleDumper::test_ansible_vault_encrypted_unicode",
+        "path": "test/units/parsing/yaml/test_dumper.py",
+        "marker": "plaintext = 'This is a string we are going to encrypt.'",
         "timeout_seconds": 300
       },
       {
         "id": "bytes",
-        "command": "python -m pytest -q test/units/parsing/yaml/test_dumper.py::TestAnsibleDumper::test_bytes",
+        "command": "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTEST_ADDOPTS= /usr/local/bin/python -I -m pytest -q -c /dev/null --noconftest test/units/parsing/yaml/test_dumper.py::TestAnsibleDumper::test_bytes",
+        "path": "test/units/parsing/yaml/test_dumper.py",
+        "marker": "b_text = u'tréma'.encode('utf-8')",
         "timeout_seconds": 300
       },
       {
         "id": "unicode",
-        "command": "python -m pytest -q test/units/parsing/yaml/test_dumper.py::TestAnsibleDumper::test_unicode",
+        "command": "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTEST_ADDOPTS= /usr/local/bin/python -I -m pytest -q -c /dev/null --noconftest test/units/parsing/yaml/test_dumper.py::TestAnsibleDumper::test_unicode",
+        "path": "test/units/parsing/yaml/test_dumper.py",
+        "marker": "u_text = u'nöel'",
         "timeout_seconds": 300
       },
       {
         "id": "vars-with-sources",
-        "command": "python -m pytest -q test/units/parsing/yaml/test_dumper.py::TestAnsibleDumper::test_vars_with_sources",
+        "command": "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTEST_ADDOPTS= /usr/local/bin/python -I -m pytest -q -c /dev/null --noconftest test/units/parsing/yaml/test_dumper.py::TestAnsibleDumper::test_vars_with_sources",
+        "path": "test/units/parsing/yaml/test_dumper.py",
+        "marker": "self._dump_string(VarsWithSources(), dumper=self.dumper)",
         "timeout_seconds": 300
       }
     ],
     "fail_to_pass": [
       {
         "id": "undefined-yaml-value",
-        "command": "python -m pytest -q test/units/parsing/yaml/test_dumper.py::TestAnsibleDumper::test_undefined",
+        "command": "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTEST_ADDOPTS= /usr/local/bin/python -I -m pytest -q -c /dev/null --noconftest test/units/parsing/yaml/test_dumper.py::TestAnsibleDumper::test_undefined",
+        "path": "test/units/parsing/yaml/test_dumper.py",
+        "marker": "undefined_object = AnsibleUndefined()",
         "timeout_seconds": 300
       }
+    ]
+  },
+  "candidate": {
+    "allowed_patch_paths": [
+      "changelogs/fragments/75072_undefined_yaml.yml",
+      "lib/ansible/parsing/yaml/dumper.py",
+      "lib/ansible/plugins/filter/core.py"
     ]
   },
   "validation": {

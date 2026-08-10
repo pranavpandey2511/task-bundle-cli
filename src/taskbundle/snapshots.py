@@ -15,12 +15,14 @@ def _git_output(
     container_id: str,
     workdir: str,
     command: list[str],
+    trusted_path: str | None,
 ) -> str:
     result = docker.exec_command(
         container_id=container_id,
         workdir=workdir,
         command=command,
         timeout_seconds=60,
+        trusted_path=trusted_path,
     )
     if not result.succeeded:
         raise InfrastructureError(
@@ -45,24 +47,28 @@ def capture_repository_snapshot(
     phase: str,
     stage: str,
     require_pristine: bool = False,
+    trusted_path: str | None = None,
 ) -> str:
     head = _git_output(
         docker=docker,
         container_id=container_id,
         workdir=workdir,
         command=["git", "rev-parse", "HEAD"],
+        trusted_path=trusted_path,
     ).strip()
     status = _git_output(
         docker=docker,
         container_id=container_id,
         workdir=workdir,
         command=["git", "status", "--porcelain=v1", "--untracked-files=all"],
+        trusted_path=trusted_path,
     )
     diff_stat = _git_output(
         docker=docker,
         container_id=container_id,
         workdir=workdir,
         command=["git", "diff", "--stat", "--no-ext-diff"],
+        trusted_path=trusted_path,
     )
     payload: dict[str, Any] = {
         "schema_version": 1,

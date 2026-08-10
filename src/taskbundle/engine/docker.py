@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from taskbundle.errors import InfrastructureError
-from taskbundle.models import RuntimeSpec
+from taskbundle.models import DEFAULT_EVALUATOR_PATH, RuntimeSpec
 from taskbundle.process import ProcessResult, Runner
 
 
@@ -71,6 +71,7 @@ class DockerClient:
         image_tag: str,
         labels: dict[str, str],
         timeout_seconds: int,
+        no_cache: bool = False,
     ) -> ImageBuildResult:
         command = self._command(
             "build",
@@ -80,6 +81,8 @@ class DockerClient:
             "--tag",
             image_tag,
         )
+        if no_cache:
+            command.append("--no-cache")
         for key, value in sorted(labels.items()):
             command.extend(["--label", f"{key}={value}"])
         command.append(str(context))
@@ -98,6 +101,7 @@ class DockerClient:
         container_name: str,
         workdir: str,
         runtime: RuntimeSpec,
+        evaluator_path: str = ":".join(DEFAULT_EVALUATOR_PATH),
     ) -> str:
         create = self._isolated_create_command(
             image_tag=image_tag,
@@ -105,10 +109,10 @@ class DockerClient:
             workdir=workdir,
             runtime=runtime,
             network="none",
+            path_override=evaluator_path,
             container_command=[
-                "/bin/sh",
-                "-lc",
-                "while :; do sleep 3600; done",
+                "-c",
+                "while :; do /bin/sleep 3600; done",
             ],
         )
         created = self.runner.run(create, timeout_seconds=30)
@@ -133,7 +137,7 @@ class DockerClient:
             workdir=workdir,
             runtime=runtime,
             network="bridge" if network_enabled else "none",
-            container_command=["/bin/sh", "-lc", "while :; do sleep 3600; done"],
+            container_command=["-c", "while :; do /bin/sleep 3600; done"],
         )
         created = self.runner.run(create, timeout_seconds=30)
         self._require_success(created, action="create solver container")
@@ -156,6 +160,13 @@ class DockerClient:
             raise InfrastructureError(
                 f"Could not read container input {source}: {error}"
             ) from error
+        self.stream_text(
+            content=content,
+            container_id=container_id,
+            destination=destination,
+        )
+
+    def stream_text(self, *, content: str, container_id: str, destination: str) -> None:
         result = self.runner.run(
             self._command(
                 "exec",
@@ -163,7 +174,7 @@ class DockerClient:
                 container_id,
                 "/bin/sh",
                 "-c",
-                'umask 077 && cat > "$1"',
+                'umask 077 && exec /bin/cat > "$1"',
                 "taskbundle-copy",
                 destination,
             ),
@@ -181,11 +192,15 @@ class DockerClient:
         timeout_seconds: int,
         environment_names: list[str] | None = None,
         environment_values: dict[str, str] | None = None,
+        trusted_path: str | None = None,
     ) -> ProcessResult:
         docker_arguments = ["exec", "--workdir", workdir]
         for name in environment_names or []:
             docker_arguments.extend(["--env", name])
-        for name, value in sorted((environment_values or {}).items()):
+        selected_values = dict(environment_values or {})
+        if trusted_path is not None:
+            selected_values["PATH"] = trusted_path
+        for name, value in sorted(selected_values.items()):
             docker_arguments.extend(["--env", f"{name}={value}"])
         docker_arguments.extend([container_id, *command])
         return self.runner.run(
@@ -209,6 +224,7 @@ class DockerClient:
         command: str,
         runtime: RuntimeSpec,
         timeout_seconds: int,
+        evaluator_path: str = ":".join(DEFAULT_EVALUATOR_PATH),
     ) -> ProcessResult:
         create = self._isolated_create_command(
             image_tag=image_tag,
@@ -216,7 +232,8 @@ class DockerClient:
             workdir=workdir,
             runtime=runtime,
             network="none",
-            container_command=["/bin/sh", "-lc", command],
+            path_override=evaluator_path,
+            container_command=["-c", command],
         )
 
         created = self.runner.run(create, timeout_seconds=30)
@@ -260,6 +277,7 @@ class DockerClient:
         runtime: RuntimeSpec,
         network: str,
         container_command: list[str],
+        path_override: str | None = None,
     ) -> list[str]:
         create = self._command(
             "create",
@@ -295,6 +313,9 @@ class DockerClient:
         )
         if runtime.user:
             create.extend(["--user", runtime.user])
+        if path_override is not None:
+            create.extend(["--env", f"PATH={path_override}"])
+        create.extend(["--entrypoint", "/bin/sh"])
         create.append(image_tag)
         create.extend(container_command)
         return create
@@ -315,6 +336,7 @@ class DockerClient:
             "no_new_privileges": True,
             "host_mounts": False,
             "docker_socket": False,
+            "entrypoint": "/bin/sh",
         }
 
     @staticmethod

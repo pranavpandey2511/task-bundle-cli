@@ -16,6 +16,7 @@ class SolverContext:
     workdir: str
     timeout_seconds: int
     environment_names: list[str]
+    trusted_path: str
 
 
 @dataclass(frozen=True, slots=True)

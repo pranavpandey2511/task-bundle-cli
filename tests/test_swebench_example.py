@@ -16,6 +16,7 @@ def test_checked_in_swebench_pro_bundle_has_immutable_provenance() -> None:
 
     assert bundle.manifest.repository.url == "https://github.com/ansible/ansible.git"
     assert bundle.manifest.repository.commit == "de01db08d00c8d2438e1ba5989c313ba16a145b0"
+    assert bundle.manifest.schema_version == 3
     assert provenance["dataset_revision"] == "7ab5114912baf22bb098818e604c02fe7ad2c11f"
     assert provenance["harness_revision"] == "ca10a60a5fcae51e6948ffe1485d4153d421e6c5"
     assert sha256_file(bundle.gold_patch_path) == (
@@ -24,8 +25,24 @@ def test_checked_in_swebench_pro_bundle_has_immutable_provenance() -> None:
     assert sha256_file(bundle.test_patch_path) == (
         "abfad56065c5dc1fd42a45ff5b6d74173ecb1ebbb2e1e5292fad42401c1f3720"
     )
+    assert sha256_file(bundle.solver_view_patch_path) == (
+        "280e884c70e19af1db6c7eca83efde0b963ed147f5707014458d1fd7a743ead4"
+    )
     assert len(bundle.manifest.tests.pass_to_pass) == 4
     assert len(bundle.manifest.tests.fail_to_pass) == 1
+    assert set(bundle.manifest.candidate.allowed_patch_paths) == {
+        "changelogs/fragments/75072_undefined_yaml.yml",
+        "lib/ansible/parsing/yaml/dumper.py",
+        "lib/ansible/plugins/filter/core.py",
+    }
+    selected_tests = bundle.manifest.tests.pass_to_pass + bundle.manifest.tests.fail_to_pass
+    assert all("/usr/local/bin/python -I -m pytest" in test.command for test in selected_tests)
+    assert {test.path for test in bundle.manifest.tests.pass_to_pass} == {
+        "test/units/parsing/yaml/test_dumper.py"
+    }
+    redaction = bundle.solver_view_patch_path.read_text(encoding="utf-8")
+    for test in bundle.manifest.tests.pass_to_pass:
+        assert any(line.startswith("-") and test.marker in line for line in redaction.splitlines())
 
 
 def test_checked_in_evaluation_summarizes_a_resolved_run() -> None:
@@ -35,8 +52,18 @@ def test_checked_in_evaluation_summarizes_a_resolved_run() -> None:
     assert evaluation["task_id"] == "swebench-pro-ansible-12734fa2"
     assert evaluation["dataset_instance_id"] == provenance_instance_id()
     assert evaluation["resolved"] is True
-    assert evaluation["source_run"]["command_id"] == "20260809T194247906772Z-7e578b0b"
-    assert evaluation["source_run"]["patch_sha256"] == sha256_file(EXAMPLE / "gold.patch")
+    assert evaluation["source_run"]["command_id"] == "20260810T044632829714Z-614c9b61"
+    assert evaluation["source_run"]["cli_version"] == "0.2.0"
+    assert evaluation["source_run"]["candidate_input_sha256"] == sha256_file(EXAMPLE / "gold.patch")
+    captured_patch = (
+        EXAMPLE
+        / ".taskbundle"
+        / "commands"
+        / evaluation["source_run"]["command_id"]
+        / "solver.patch"
+    )
+    if captured_patch.is_file():
+        assert evaluation["source_run"]["patch_sha256"] == sha256_file(captured_patch)
 
     baseline = evaluation["phases"]["baseline"]
     post_solver = evaluation["phases"]["post_solver"]
@@ -58,9 +85,24 @@ def test_submission_docs_cover_usage_and_tradeoffs() -> None:
     readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
     design = (PROJECT_ROOT / "DESIGN.md").read_text(encoding="utf-8")
 
-    for command in ("task init", "task validate", "task run", "task logs"):
+    for command in (
+        "task new",
+        "task init",
+        "task validate",
+        "task run",
+        "task report",
+        "task doctor",
+    ):
         assert command in readme
     assert "evaluation.json" in readme
-    assert "## Isolation" in design
-    assert "## Observability and reproducibility" in design
+    for decision in (
+        "## Lifecycle and correctness",
+        "## Test secrecy and trust boundary",
+        "## Runtime isolation",
+        "## Reproducibility and determinism",
+        "## Evidence and observability",
+        "## UX and error model",
+        "## Performance tradeoffs",
+    ):
+        assert decision in design
     assert len([paragraph for paragraph in design.split("\n\n") if paragraph.strip()]) >= 3

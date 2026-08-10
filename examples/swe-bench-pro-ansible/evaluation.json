@@ -4,11 +4,17 @@
   "dataset_instance_id": "instance_ansible__ansible-12734fa21c08a0ce8c84e533abdc560db2eb1955-v7eee2454f617569fd6889f2211f75bc02a35f9f8",
   "resolved": true,
   "source_run": {
-    "command_id": "20260809T194247906772Z-7e578b0b",
+    "command_id": "20260810T044632829714Z-614c9b61",
+    "cli_version": "0.2.0",
     "solver": "patch",
-    "repetitions": 1,
-    "execution_fingerprint": "c439441861c36f55f61900956790c151ae1df8fa3735fd5ba495fbbad354d6e0",
-    "patch_sha256": "787d63373c26ae760362464bc2b763771b51f83a1e61df830bb996bf5c72f7b3"
+    "repetitions": 3,
+    "execution_fingerprint": "2a5b811c3b9d33e942c8d8d78a44879dc365f59b8b55ecdd1ed2cae2b48ab812",
+    "image_id": "sha256:08e61301b23fdbc07cdf3485c514ed6cc187ffbdcfdfa31c9b0c87e9b482ae83",
+    "solver_image_id": "sha256:2371ce1988654ac31bf81a44b72c6e7dd0600bb3706828469fa90974e1ddb793",
+    "solver_base_commit": "6e478881d4a7b3e66563b4e3cc990962129a4acc",
+    "solver_view_sha256": "280e884c70e19af1db6c7eca83efde0b963ed147f5707014458d1fd7a743ead4",
+    "candidate_input_sha256": "787d63373c26ae760362464bc2b763771b51f83a1e61df830bb996bf5c72f7b3",
+    "patch_sha256": "6eb893c321a7077aff47fa886df58ab5b1cf0a2249a884fd6670c4b2db59639e"
   },
   "phases": {
     "baseline": [

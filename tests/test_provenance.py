@@ -4,7 +4,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from taskbundle.config import load_bundle
-from taskbundle.lifecycle.initialize import build_fingerprint, image_tag, sha256_file
+from taskbundle.lifecycle.initialize import (
+    build_fingerprint,
+    image_tag,
+    sha256_file,
+    solver_secrecy_contract_sha256,
+)
 from taskbundle.models import BuildMetadata
 from taskbundle.provenance import build_execution_provenance
 
@@ -20,8 +25,13 @@ def test_execution_fingerprint_is_stable_and_changes_with_inputs(
         repository_url=bundle.manifest.repository.url,
         repository_commit=bundle.manifest.repository.commit,
         dockerfile_sha256=sha256_file(bundle.dockerfile_path),
+        solver_view_sha256=sha256_file(bundle.solver_view_patch_path),
+        secrecy_contract_sha256=solver_secrecy_contract_sha256(bundle),
         image_tag=image_tag(bundle.manifest.id, fingerprint),
         image_id="sha256:" + "e" * 64,
+        solver_image_tag=f"taskbundle/{bundle.manifest.id}-solver:{fingerprint[:16]}",
+        solver_image_id="sha256:" + "f" * 64,
+        solver_base_commit="d" * 40,
         git_version="git version test",
         docker_client_version="test",
         docker_server_version="test",
