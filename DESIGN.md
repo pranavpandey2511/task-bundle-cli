@@ -35,16 +35,25 @@ The second checked-in bundle, `examples/swe-bench-pro-ansible-safe-eval/`, delib
 
 ## Decisions at a glance
 
-| Decision                               | Reason                                                            | Cost                                                                |
-| -------------------------------------- | ----------------------------------------------------------------- | ------------------------------------------------------------------- |
-| Full Git commit and schema-v3 manifest | Reject mutable or ambiguous task inputs.                          | Authors must supply explicit metadata.                              |
-| Task-owned Dockerfile and commands     | Work across languages and test frameworks.                        | Command correctness remains an author responsibility.               |
-| Separate evaluator and solver images   | Remove selected tests and original Git history before solving.    | Two image builds use more time and disk.                            |
-| Whole-file evaluator ownership         | Provides a verifiable, language-neutral secrecy rule.             | Public and private tests cannot share a file.                       |
-| Candidate path allow-list              | Prevent test, runner, or unrelated-file manipulation.             | The solution surface must be maintained explicitly.                 |
-| Optional host-mediated OpenRouter agent | Keep model credentials and API traffic outside untrusted code.     | Agent output is model-dependent and consumes external API credits.  |
-| Fresh container per attempt            | Prevent state leakage between tests and phases.                   | Evaluation is intentionally slower.                                 |
-| Static HTML reports over a web app     | Give reviewers a useful interface without another execution path. | Reports are local evaluator artifacts, not a collaboration service. |
+These choices define what the task author must provide and what the CLI guarantees in return:
+
+1. **Pin every task to exact inputs.** A task names a full Git commit and uses a schema-validated `task.json`. The CLI snapshots and hashes the trusted bundle files before a lifecycle command starts. This prevents a moving branch, an incomplete commit ID, or a mid-run file edit from silently changing what is evaluated. The tradeoff is that task authors must provide explicit, immutable inputs.
+
+2. **Let the bundle describe how its repository works.** The bundle supplies its Dockerfile, dependency setup, smoke command, and test commands. The CLI does not need built-in knowledge of pytest, npm, Cargo, or another framework; it only runs the declared commands and records their outcomes. This is what makes the execution model language-neutral, but the task author remains responsible for making those commands correct and reproducible.
+
+3. **Build separate evaluator and solver images.** The evaluator image contains the complete trusted source needed to grade a solution. The solver image removes selected evaluator files, the original Git history, remotes, and other protected material before the solver starts. A solver therefore cannot inspect the hidden tests or reference patch through its filesystem. The cost is an additional image build and more disk usage.
+
+4. **Treat selected test files as entirely evaluator-owned.** A file containing a selected PASS_TO_PASS or FAIL_TO_PASS check is protected as one unit rather than trying to hide individual functions or lines. Initialization can then prove that the whole path and its markers are absent from the solver image. This gives a simple rule that works across languages, but public and hidden checks cannot share the same file.
+
+5. **Restrict what a candidate patch may change.** Each bundle allow-lists the implementation files or directories that a valid solution may touch. Evaluator files are always protected, and explicit deny rules can carve sensitive paths out of a broader allowed directory. This prevents a solver from replacing tests or runner configuration to manufacture a pass, but the policy must be maintained when the legitimate solution surface changes.
+
+6. **Keep model access on the trusted host.** The optional OpenRouter agent is driven by the CLI on the host; its API key and network traffic never enter the solver container. The `patch` and `stub` solvers provide offline alternatives that use the same grading path. This protects credentials and preserves one evaluation boundary, while live agent runs remain model-dependent and may consume external API credits.
+
+7. **Use a fresh container for every test attempt.** Each repetition starts from the same image in a new container and disposable work volume. State created by one check cannot leak into the next check or phase, and inconsistent repetitions are reported as flakiness. This improves attribution and repeatability at the cost of slower evaluation.
+
+8. **Generate reports from recorded evidence, not a second execution service.** Lifecycle commands store events, logs, test observations, hashes, and patches in the local evidence ledger. Static HTML reports only render that recorded data; they never rerun tests or invoke a solver. Review stays simple and auditable, but reports are local evaluator artifacts and can contain private test information.
+
+Together, these decisions keep repository-specific knowledge inside the task bundle while the CLI provides the same isolation, validation, grading, and evidence lifecycle for every task.
 
 ## Lifecycle and correctness
 
@@ -63,56 +72,91 @@ Only exit code `0` is a pass. Configured assertion exits, normally `1`, are fail
 
 For example, `task run my-task --solver patch --candidate-patch fix.patch` is a fully local, reproducible positive-control path. `task run my-task --solver agent --model provider/model-id` is an optional live attempt that can consume credits and sends the problem plus model-requested source excerpts to OpenRouter. `task run my-task --solver stub` is useful when reviewing failure messages and reports without a candidate change.
 
-## Test secrecy and trust boundary
+## Security and trust boundary
 
-`gold.patch`, `tests/hidden.patch`, `tests/solver-view.patch`, the manifest, and reviewer evidence are trusted evaluator material. The solver receives none of them. Hidden tests add evaluator files missing from the base commit; the solver-view patch removes base-resident evaluator files. Public and non-bucket tests remain visible. Initialization scans the sanitized filesystem, environment, and synthetic Git history and fails closed if a protected marker is found or the scan cannot complete.
+The system has an explicit trust model:
 
-Secrecy and candidate policy solve different problems. Redaction prevents the solver from reading selected tests before solving. The allow-list prevents it from replacing tests, configuration, runner-shadow modules, or unrelated code to manufacture a pass. Authors should therefore keep `candidate.allowed_patch_paths` as narrow as the legitimate implementation surface. When an implementation surface must be broad, `candidate.disallowed_patch_paths` can carve out literal descendant files or directories; a deny rule wins over an allow rule. Evaluator-owned paths remain an unconditional hard ban, and globs are not supported.
+| Trusted | Untrusted |
+| --- | --- |
+| Task author, manifest, Dockerfile, evaluator commands, CLI, and local Docker daemon | Solver, candidate patch, and code executed from that patch |
 
-The bundle author, Dockerfile, evaluator commands, CLI, and local Docker daemon are trusted. The solver and candidate patch are not. Docker protects the host and separates phases, but a generic exit-code harness cannot prove arbitrary candidate code behaved honestly inside a shared language process. High-assurance tasks should keep critical assertions in an external process that candidate code cannot control.
+### Keeping evaluator material secret
 
-## Runtime isolation
+The manifest, gold patch, hidden-test patch, solver-view patch, and reviewer evidence stay outside the solver container. Hidden tests add evaluator-only files, while the solver-view patch removes selected tests that already exist in the base repository. Public tests remain available to the solver.
 
-Solver and evaluator containers have no host bind mount, Docker socket, or network. They use a disposable work volume, read-only root filesystem, bounded tmpfs directories, CPU/memory/PID limits, dropped capabilities, `no-new-privileges`, a forced shell entrypoint, and explicit timeouts. OpenRouter requests originate from the trusted host process; the API key is never copied into the container. Evaluator operations use validated absolute tool paths outside the writable repository and `/tmp`.
+During initialization, the CLI scans the sanitized filesystem, environment, and synthetic Git history. It rejects the solver image if a protected path or marker is found, or if the scan cannot complete.
 
-This is a practical local boundary, not formal hostile multi-tenancy. Containers share the host kernel, and trusted Dockerfile builds may access dependency networks. A production service should add disposable workers or microVMs, image policy and scanning, host-level egress controls, external watchdogs, quotas, and short-lived credentials.
+Test secrecy and patch policy protect different things:
 
-## Reproducibility and determinism
+- **Secrecy** stops the solver from reading selected evaluator tests before solving.
+- **Patch policy** stops it from changing tests, runner configuration, or unrelated files to manufacture a pass.
 
-Repositories use full commits, and build identity includes CLI version, staging schema, repository URL and commit, bundle ID, workdir, Dockerfile hash, solver-view hash, and protected-path/marker rules. Cached tags are only conveniences; recorded immutable image IDs must still match.
+`candidate.allowed_patch_paths` should therefore name only the legitimate implementation surface. `candidate.disallowed_patch_paths` can exclude sensitive descendants from a broader allowed directory. Deny rules win, evaluator-owned paths are always forbidden, and path globs are not supported.
 
-At the start of validation and run, the manifest, description, Dockerfile, and evaluator patches are snapshotted and hashed. Those trusted copies are reused for the command, preventing a mid-run edit from changing later phases. Provenance also records repetitions, runtime limits, image IDs, solver adapter, network policy, requested model, and candidate-input hash. Agent evidence adds the actual routed model, step count, and token usage; model generation itself is not deterministic, so the captured patch and evaluator results remain the reproducible review boundary.
+### Isolating execution
 
-Exact cross-machine behavior still depends on bundle discipline: digest-pinned base images, locked dependencies, compatible architectures, locale, and upstream availability. Timestamps, command IDs, container IDs, and durations are evidence, not deterministic inputs.
+Solver and evaluator containers run with:
 
-## Evidence and observability
+- no host bind mounts, Docker socket, or runtime network;
+- a read-only root filesystem and disposable work volume;
+- bounded temporary storage and an ephemeral home directory;
+- CPU, memory, PID, and wall-clock limits;
+- all Linux capabilities dropped and `no-new-privileges` enabled.
 
-Every lifecycle command gets a sortable command ID. SQLite stores sanitized arguments, status, exit code, events, and per-test observations. Content-hashed files retain trusted input snapshots, build and test logs, patch checks, repository snapshots, solver output, captured patches, provenance, and final JSON. `task report` reads this evidence without rerunning untrusted code, verifies artifact integrity, diagnoses mismatches, flakiness, timeouts, and runner failures, and suggests the next command.
+OpenRouter requests run from the trusted host process, so the API key never enters the container. Evaluator operations use validated absolute tool paths outside the candidate-writable repository and `/tmp`.
 
-### HTML reports
+This is strong isolation for a local tool, not hostile multi-tenant security. Containers still share the host kernel, and candidate code may influence assertions executed inside the same language process. High-assurance checks should run critical assertions from an external trusted process. A hosted service would also need disposable workers or microVMs, image scanning, host-level egress controls, quotas, watchdogs, and short-lived credentials.
 
-Every `new`, `init`, `validate`, and `run` result—including failures—produces a self-contained static HTML report. The immutable review for a command is stored at:
+## Reproducibility and evidence
+
+The CLI separates repeatable inputs from run-specific evidence.
+
+### Repeatable inputs
+
+- Repositories are pinned to full Git commits.
+- Build identity includes the CLI and staging versions, repository and commit, bundle ID, workdir, Dockerfile, solver-view patch, and secrecy rules.
+- Validation and run snapshot and hash the manifest, description, Dockerfile, and evaluator patches before doing any work.
+- Immutable image IDs are recorded and verified; cached image tags are only shortcuts.
+- Provenance records runtime limits, repetitions, image IDs, solver adapter, network policy, model request, and candidate-input hash.
+
+Model generation is not deterministic. For agent runs, the evidence also records the routed model, steps, and token usage, but the captured candidate patch and its evaluator results remain the reviewable boundary.
+
+Exact behavior across machines still depends on the bundle: base images should be pinned by digest, dependencies locked, and architecture and locale controlled. Timestamps, command IDs, container IDs, and durations describe a run; they are not reproducible inputs.
+
+### Review evidence
+
+Every lifecycle command receives a sortable command ID. SQLite stores its sanitized arguments, status, exit code, timeline, and test observations. Content-hashed artifact files store input snapshots, build and test logs, patch checks, repository snapshots, solver output, provenance, and final JSON.
+
+`task report` verifies those artifacts and explains mismatches, flakiness, timeouts, and runner errors without executing untrusted code. Every lifecycle result, including a failure, also gets an immutable static HTML report at:
 
 ```text
 .taskbundle/commands/<command-id>/report.html
 ```
 
-The report presents the outcome, expected-versus-observed tests, diagnosis, bounded log excerpts, candidate changes, provenance, factual events, and links to exact artifacts. It is rendered from escaped ledger evidence and never invokes a solver or test command, so it remains a presentation layer over the same source of truth rather than a second evaluator.
+`.taskbundle/reports/latest.html` opens the newest report, and `.taskbundle/reports/index.html` lists the full history. Reports and ZIP exports can contain hidden-test names, logs, diffs, source excerpts, and model output, so they must remain on the trusted reviewer side.
 
-`.taskbundle/reports/index.html` lists all report versions newest first, while `.taskbundle/reports/latest.html` redirects to the newest review. The CLI prints these paths in its summary, and `task report --bundle BUNDLE` locates them while verifying the recorded evidence. Because HTML can contain hidden-test names, evaluator logs, diffs, and solver output, it must remain on the trusted reviewer side. The deterministic ZIP export has the same sharing restriction.
+## CLI behavior and errors
 
-## UX and error model
+The main commands are `new`, `init`, `validate`, `run`, `report`, and `doctor`.
 
-The documented surface is `new`, `init`, `validate`, `run`, `report`, and `doctor`. Parser mistakes show usage and help. Lifecycle failures have a stable kind and exit code, a concise message, an actionable hint when possible, structured details, a command ID, and evidence paths. Human output goes to stderr and ends with copy-paste next steps; `--json` provides one machine-readable report on stdout after argument parsing succeeds.
+- Parser errors show command usage and help.
+- Lifecycle failures provide a stable error kind and exit code, a short explanation, an actionable hint when available, a command ID, and evidence paths.
+- Human-readable output goes to stderr and ends with useful next commands.
+- `--json` emits one machine-readable report on stdout after parsing succeeds.
 
-Arguments are sanitized before persistence. Repository URLs, tokens, passwords, and secret-like values are redacted. The OpenRouter key is read from the host environment or `.env`, used only in the authorization header, and never persisted or exposed to agent tools. Reports remain private evaluator evidence because they can contain source excerpts, model output, and candidate changes.
+Arguments are sanitized before storage. Credentials and secret-like values are redacted. The OpenRouter key is read from the host environment or `.env`, used only for the API request, and never persisted or exposed to solver tools.
 
-## Performance tradeoffs
+## Performance and deliberate limits
 
-Correctness and attribution currently take priority over throughput: attempts are sequential, each uses a fresh container and volume, validation runs baseline and golden phases, and a solver run repeats the baseline. Safe authoring shortcuts are Docker-free static validation, content-addressed image reuse, and temporarily lowering repetitions. Bounded parallel attempts are the clearest future optimization if each attempt keeps independent state, deterministic result ordering, and complete evidence.
+Correctness currently takes priority over speed. Attempts run sequentially, every repetition gets a fresh container and volume, validation runs both baseline and golden phases, and solver runs repeat the baseline. Authors can iterate faster with static validation, cached images, or fewer repetitions. Bounded parallel attempts are the clearest future optimization, provided each attempt keeps isolated state, deterministic ordering, and complete evidence.
 
-## Deliberate limits
+The implementation deliberately does not include:
 
-The agent is one bounded OpenRouter model/tool loop, not a LangGraph workflow. The current flow has no branching agents, checkpoint resume, or human approval nodes, so another orchestration and persistence layer would duplicate the existing lifecycle and SQLite ledger. LangGraph becomes appropriate if those requirements are added.
+- hostile multi-tenant isolation or adversarial in-process grading;
+- full software-supply-chain attestation;
+- per-container resource telemetry;
+- redacted reports intended for public sharing;
+- distributed execution;
+- branching agents, checkpoint resume, or human approval workflows.
 
-The current implementation does not claim hostile multi-tenant isolation, adversarial in-process grading, complete supply-chain attestation, per-container resource telemetry, redacted public report exports, or distributed execution. Those features should be added only when their requirements are real; the current design remains a lean local evaluator with explicit, inspectable guarantees.
+The agent remains one bounded OpenRouter model-and-tool loop. A workflow framework such as LangGraph would become useful only if branching, resumability, or approval steps become real requirements. Until then, it would duplicate the lifecycle and SQLite persistence already present in the CLI.
